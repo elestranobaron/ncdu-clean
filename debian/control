@@ -1,0 +1,32 @@
+Source: ncdu-clean
+Section: admin
+Priority: optional
+Maintainer: Thomas Lloancy <tlloancy@deter-mi.net>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-sequence-python3,
+ gettext,
+ python3,
+Standards-Version: 4.7.4
+Rules-Requires-Root: no
+Homepage: https://github.com/elestranobaron/ncdu-clean
+
+Package: ncdu-clean
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ${python3:Depends},
+Recommends:
+ ncdu,
+Description: delete files found with ncdu, with a journal and an undo
+ ncdu-clean works on an export made by ncdu. It lets you browse the export in
+ a terminal, mark files and directories, and then choose what to do with the
+ selection: delete it, move it to a quarantine, or save the list.
+ .
+ With an export, each path is checked against the scan and refused if the
+ file changed since (size, modification time) or if a directory gained files.
+ Without an export, rm warns, then acts when --yes is given. Every action is
+ simulated first. The journal entry is written before the removal.
+ Quarantined files can be put back where they came from, in whole or in part.
+ .
+ The interface is available in English and French.

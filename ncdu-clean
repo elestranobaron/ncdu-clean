@@ -1,0 +1,1270 @@
+#!/usr/bin/env python3
+# Copyright (C) 2026 Thomas Lloancy
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""ncdu-clean: delete files found with ncdu, and keep a record of what was removed."""
+import argparse
+import datetime
+import getpass
+import gettext
+import json
+import os
+import re
+import shutil
+import signal
+import stat
+import sys
+import time
+import uuid
+
+__version__ = "0.2.0"
+DOMAIN = "ncdu-clean"
+
+
+# --- translations (gettext) ----------------------------------------------------
+# Source strings are English. Catalogues are looked up in $NCDU_CLEAN_LOCALEDIR,
+# then in a "locale" directory next to this script, then in the system default
+# (/usr/share/locale), which is where the Debian package installs them.
+
+def _localedir():
+    env = os.environ.get("NCDU_CLEAN_LOCALEDIR")
+    if env:
+        return env
+    local = os.path.join(os.path.dirname(os.path.realpath(__file__)), "locale")
+    return local if os.path.isdir(local) else None
+
+
+_translation = gettext.translation(DOMAIN, localedir=_localedir(), fallback=True)
+_ = _translation.gettext
+ngettext = _translation.ngettext
+pgettext = _translation.pgettext
+
+UNITS = [pgettext("unit", "B"), pgettext("unit", "KiB"), pgettext("unit", "MiB"),
+         pgettext("unit", "GiB"), pgettext("unit", "TiB")]
+SIZE_SUFFIX = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+
+
+class Refuse(Exception):
+    """A path we refuse to delete (the message says why)."""
+
+
+class ExportError(Exception):
+    """The ncdu export could not be read."""
+
+
+class Aborted(Exception):
+    """The user pressed q while loading."""
+
+
+def die(msg):
+    print(f"ncdu-clean: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def warn(msg):
+    print(_("warning: {msg}").format(msg=msg), file=sys.stderr)
+
+
+def human(n):
+    i, n = 0, float(n)
+    while n >= 1024 and i < len(UNITS) - 1:
+        n /= 1024
+        i += 1
+    return f"{n:.0f} {UNITS[i]}" if i == 0 else f"{n:.1f} {UNITS[i]}"
+
+
+def fmt_files(n):
+    return ngettext("{n} file", "{n} files", n).format(n=n)
+
+
+def fmt_paths(n):
+    return ngettext("{n} path", "{n} paths", n).format(n=n)
+
+
+def parse_size(text):
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([KMGT]?)(?:i?B)?", text.strip(), re.I)
+    if not m:
+        raise argparse.ArgumentTypeError(
+            _("invalid size: {text!r} (e.g. 100M, 2G)").format(text=text))
+    return int(float(m.group(1)) * SIZE_SUFFIX[m.group(2).upper()])
+
+
+def state_dir():
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "ncdu-clean")
+
+
+def default_log():
+    env = os.environ.get("NCDU_CLEAN_LOG")
+    if env:
+        return env
+    if os.geteuid() == 0:
+        return "/var/log/ncdu-clean.jsonl"
+    return os.path.join(state_dir(), "deleted.jsonl")
+
+
+def default_trash():
+    return os.path.join(state_dir(), "quarantine")
+
+
+def normalize(path):
+    """Absolute, normalised path; symbolic links are not resolved."""
+    path = os.path.normpath(os.path.abspath(path))
+    return "/" + path.lstrip("/")  # normpath may keep a leading "//"
+
+
+# --- ncdu export ---------------------------------------------------------------
+# Format: [1, 2, {meta}, ROOT]. A directory is a list [{info}, child, ...],
+# a file is a plain object {info}.
+
+def info_of(node):
+    return node[0] if isinstance(node, list) else node
+
+
+def children_of(node):
+    return node[1:] if isinstance(node, list) else []
+
+
+_WS = re.compile(r"[ \t\r\n,]*")
+_scan_once = json.JSONDecoder().scan_once
+
+
+def parse_export(text, progress=None):
+    """Parse an ncdu export incrementally so that progress can be reported.
+
+    Only [ and ] are handled here; every object is decoded by the json module.
+    Costs about 1.7x json.loads, which is worth it for a progress bar."""
+    n = len(text)
+    ws = _WS.match
+    scan = _scan_once
+    pos = ws(text, 0).end()
+    if pos >= n or text[pos] != "[":
+        raise ValueError("not a JSON array")
+    pos += 1
+    cur, stack = [], []
+    items = size = 0
+    while True:
+        pos = ws(text, pos).end()
+        if pos >= n:
+            raise ValueError("truncated file")
+        c = text[pos]
+        if c == "[":
+            stack.append(cur)
+            cur = []
+            pos += 1
+        elif c == "]":
+            pos += 1
+            if not stack:
+                if progress:
+                    progress("parse", 1.0, items, size, "")
+                return cur
+            parent = stack.pop()
+            parent.append(cur)
+            cur = parent
+        else:
+            try:
+                obj, pos = scan(text, pos)
+            except StopIteration:
+                raise ValueError("invalid JSON at offset %d" % pos)
+            cur.append(obj)
+            if type(obj) is dict:
+                items += 1
+                size += obj.get("dsize", 0)
+                if progress and not items & 0x3FFF:
+                    names = [lst[0].get("name", "") for lst in stack[1:] + [cur]
+                             if lst and type(lst[0]) is dict]
+                    shown = os.path.join(*names, obj.get("name", "")) if names else ""
+                    progress("parse", pos / n, items, size, shown)
+
+
+def read_text(path, progress=None):
+    total = os.path.getsize(path)
+    chunks, done = [], 0
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(16 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            done += len(chunk)
+            if progress:
+                progress("read", done / max(total, 1), 0, 0, "")
+    return b"".join(chunks).decode("utf-8", "surrogateescape")
+
+
+def load_export(path, progress=None):
+    """Load an export. progress(phase, fraction, items, size, current) may raise Aborted."""
+    try:
+        data = parse_export(read_text(path, progress), progress)
+    except (OSError, ValueError) as e:
+        raise ExportError(_("unreadable export ({path}): {err}").format(path=path, err=e))
+    if not (isinstance(data, list) and len(data) >= 4 and data[0] == 1
+            and isinstance(data[3], list)):
+        raise ExportError(_("{path} does not look like an ncdu export (made with ncdu -o)")
+                          .format(path=path))
+    root = data[3]
+    if not str(info_of(root).get("name", "")).startswith("/"):
+        raise ExportError(_("the scan must use an absolute path: ncdu -e -o scan.json /path"))
+    return root
+
+
+class StderrProgress:
+    """One-line progress on stderr for the non-interactive commands."""
+
+    def __init__(self):
+        self.on = sys.stderr.isatty()
+        self.last = 0.0
+
+    def __call__(self, phase, frac, items, size, current):
+        if not self.on:
+            return
+        now = time.monotonic()
+        if now - self.last < 0.1 and frac < 1:
+            return
+        self.last = now
+        label = _("Reading file…") if phase == "read" else _("Analysing…")
+        sys.stderr.write(f"\r{label} {frac * 100:3.0f}%  "
+                         + _("{n} items").format(n=items) + "\033[K")
+
+    def done(self):
+        if self.on:
+            sys.stderr.write("\r\033[K")
+
+
+def load_cli(path):
+    prog = StderrProgress()
+    try:
+        return load_export(path, prog)
+    except ExportError as e:
+        die(str(e))
+    finally:
+        prog.done()
+
+
+def find(root, path):
+    """Find the export node for an absolute path."""
+    base = info_of(root)["name"].rstrip("/")
+    if path == (base or "/"):
+        return root
+    if not path.startswith(base + "/"):
+        return None
+    node = root
+    for part in path[len(base) + 1:].split("/"):
+        for child in children_of(node):
+            if info_of(child).get("name") == part:
+                node = child
+                break
+        else:
+            return None
+    return node
+
+
+def subtree_meta(node, path, out):
+    """Fill out with {path: (info, is_dir)} for a whole subtree."""
+    info = info_of(node)
+    out[path] = (info, isinstance(node, list))
+    for child in children_of(node):
+        subtree_meta(child, os.path.join(path, info_of(child)["name"]), out)
+    return out
+
+
+def collect(node, parent, apparent, out):
+    """Append (path, is_dir, size) for every node; return the node's cumulative size."""
+    info = info_of(node)
+    path = info["name"] if parent is None else os.path.join(parent, info["name"])
+    size = info.get("asize" if apparent else "dsize", 0)
+    for child in children_of(node):
+        size += collect(child, path, apparent, out)
+    out.append((path, isinstance(node, list), size))
+    return size
+
+
+def compute_sizes(node, disk, app):
+    """Cumulative sizes (disk usage / apparent) of every node, keyed by id(node)."""
+    info = info_of(node)
+    d, a = info.get("dsize", 0), info.get("asize", 0)
+    for child in children_of(node):
+        cd, ca = compute_sizes(child, disk, app)
+        d += cd
+        a += ca
+    disk[id(node)], app[id(node)] = d, a
+    return d, a
+
+
+# --- disk ----------------------------------------------------------------------
+
+def kind(mode):
+    if stat.S_ISDIR(mode):
+        return "dir"
+    if stat.S_ISLNK(mode):
+        return "link"
+    return "file" if stat.S_ISREG(mode) else "other"
+
+
+def walk_disk(path):
+    """(path, lstat) of path and everything below it, never following symlinks."""
+    st = os.lstat(path)
+    yield path, st
+    if stat.S_ISDIR(st.st_mode):
+        with os.scandir(path) as it:
+            for entry in sorted(it, key=lambda e: e.name):
+                yield from walk_disk(entry.path)
+
+
+def check_target(path, scan, recursive, trash):
+    """Check that path may be removed. Return (records, verified) or raise Refuse."""
+    if path.count("/") <= 1:
+        raise Refuse(_("top-level path (/, /etc, /var...): refused on principle"))
+    if path == normalize(os.path.expanduser("~")):
+        raise Refuse(_("this is your home directory"))
+    if trash and (path == trash or trash.startswith(path + "/")):
+        raise Refuse(_("the quarantine is inside this path"))
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        raise Refuse(_("does not exist any more"))
+    except OSError as e:
+        raise Refuse(_("unreadable ({err})").format(err=e.strerror))
+    is_dir = stat.S_ISDIR(st.st_mode)
+
+    node = None
+    if scan is not None:
+        if path == info_of(scan)["name"].rstrip("/"):
+            raise Refuse(_("this is the root of the scan"))
+        node = find(scan, path)
+        if node is None:
+            raise Refuse(_("not in the export (created since the scan, or outside it)"))
+        info = info_of(node)
+        if isinstance(node, list) != is_dir:
+            raise Refuse(_("the type changed since the scan"))
+        if not is_dir:
+            if "mtime" in info and int(st.st_mtime) != info["mtime"]:
+                raise Refuse(_("modified since the scan"))
+            if st.st_size != info.get("asize", 0):
+                raise Refuse(_("size differs from the scan"))
+
+    try:
+        entries = list(walk_disk(path))
+    except OSError as e:
+        raise Refuse(_("unreadable ({err})").format(err=e.strerror))
+    if is_dir and len(entries) > 1 and not recursive:
+        raise Refuse(_("directory is not empty: add -r"))
+
+    if is_dir and node is not None:
+        known = subtree_meta(node, path, {})
+        for p, s in entries:
+            if p not in known:
+                raise Refuse(_("created since the scan: {path}").format(path=p))
+            info, _isdir = known[p]
+            if not stat.S_ISDIR(s.st_mode):
+                if "mtime" in info and int(s.st_mtime) != info["mtime"]:
+                    raise Refuse(_("modified since the scan: {path}").format(path=p))
+                if s.st_size != info.get("asize", 0):
+                    raise Refuse(_("size differs from the scan: {path}").format(path=p))
+
+    recs = [{"path": p, "type": kind(s.st_mode), "size": s.st_size,
+             "mtime": int(s.st_mtime)} for p, s in entries]
+    return recs, scan is not None
+
+
+# --- removal (shared by `rm` and the interactive browser) ----------------------
+
+def journal_sync(logfh, log_path):
+    """Flush the journal file and its directory before any removal."""
+    logfh.flush()
+    os.fsync(logfh.fileno())
+    directory = os.path.dirname(os.path.abspath(log_path))
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def run_removal(paths, scan, recursive, trash, yes, log_path, hint=True):
+    """Check, then simulate (yes=False) or delete / quarantine (yes=True).
+
+    The journal entry is synced before the removal. Prints everything.
+    Returns (exit_code, paths_that_are_gone)."""
+    trash = normalize(trash) if trash else None
+    dry = not yes
+    run = datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = str(os.getuid())
+
+    logfh = None
+    if not dry:  # no journal, no deletion
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(log_path)), mode=0o700, exist_ok=True)
+            logfh = open(log_path, "a", encoding="utf-8", errors="surrogateescape")
+            if trash:
+                logfh.write(json.dumps({
+                    "event": "trash-run", "ts": now_iso(), "run": run, "user": user,
+                    "trash_dir": os.path.join(trash, run)}, ensure_ascii=False) + "\n")
+            journal_sync(logfh, log_path)
+        except OSError as e:
+            print(_("ncdu-clean: journal not writable ({path}: {err}). Nothing was deleted.")
+                  .format(path=log_path, err=e.strerror), file=sys.stderr)
+            return 2, []
+
+    ok = refused = failed = 0
+    total = 0
+    gone_paths = []
+    for path in paths:
+        try:
+            recs, verified = check_target(path, scan, recursive, trash)
+        except Refuse as r:
+            print(_("REFUSED      {path}: {why}").format(path=path, why=r), file=sys.stderr)
+            refused += 1
+            continue
+        files = [r for r in recs if r["type"] != "dir"]
+        size = sum(r["size"] for r in files)
+        label = "({files}, {size})".format(files=fmt_files(len(files)), size=human(size))
+        if dry:
+            print(_("[simulation] {path}  {label}").format(path=path, label=label))
+            ok += 1
+            total += size
+            continue
+
+        ts = now_iso()
+        action = "trash" if trash else "delete"
+        try:
+            for r in recs:
+                logfh.write(json.dumps({"ts": ts, "run": run, "user": user,
+                                        "action": action, **r,
+                                        "verified": verified}, ensure_ascii=False) + "\n")
+            journal_sync(logfh, log_path)
+        except OSError as e:
+            print(_("FAILED       {path}: {why} ({gone}/{count} items gone)").format(
+                path=path, why=e.strerror, gone=0, count=len(recs)), file=sys.stderr)
+            failed += 1
+            continue
+
+        err = None
+        try:
+            if trash:
+                dest = os.path.join(trash, run, path.lstrip("/"))
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.move(path, dest)
+            elif recs[0]["type"] == "dir":
+                shutil.rmtree(path) if len(recs) > 1 else os.rmdir(path)
+            else:
+                os.unlink(path)
+        except OSError as e:
+            err = e
+
+        gone = [r for r in recs if not os.path.lexists(r["path"])]
+        stayed = [r for r in recs if os.path.lexists(r["path"])]
+        if stayed:
+            ts = now_iso()
+            for r in stayed:
+                logfh.write(json.dumps({"ts": ts, "run": run, "user": user,
+                                        "action": "aborted", **r,
+                                        "verified": verified}, ensure_ascii=False) + "\n")
+            try:
+                journal_sync(logfh, log_path)
+            except OSError:
+                pass
+        gone_paths += [r["path"] for r in gone]
+
+        if err or len(gone) < len(recs):
+            print(_("FAILED       {path}: {why} ({gone}/{count} items gone)").format(
+                path=path, why=err.strerror if err else _("partial removal"),
+                gone=len(gone), count=len(recs)), file=sys.stderr)
+            failed += 1
+        else:
+            word = _("QUARANTINED") if trash else _("DELETED")
+            print(f"{word:<12} {path}  {label}")
+            ok += 1
+            total += size
+
+    if dry:
+        verb = _("to delete")
+    else:
+        verb = _("quarantined") if trash else _("deleted")
+    print("\n" + _("{paths} {verb} ({size}), {refused} refused, {failed} failed.").format(
+        paths=fmt_paths(ok), verb=verb, size=human(total), refused=refused, failed=failed))
+    if dry:
+        if hint:
+            print(_("Simulation only: add --yes to act."))
+    else:
+        logfh.close()
+        print(_("Journal: {path}").format(path=log_path))
+        if trash:
+            print(_("Quarantine: {path}  (restore with: ncdu-clean restore {run})")
+                  .format(path=os.path.join(trash, run), run=run))
+    return (1 if (refused or failed) else 0), gone_paths
+
+
+def now_iso():
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+# --- journal and restore -------------------------------------------------------
+
+def read_journal(path):
+    records = []
+    try:
+        with open(path, encoding="utf-8", errors="surrogateescape") as fh:
+            for line in fh:
+                try:
+                    records.append(json.loads(line))
+                except ValueError:
+                    continue
+    except FileNotFoundError:
+        pass
+    return records
+
+
+def trash_runs(records):
+    """{run id: {"ts", "trash_dir", "items": {path: record}}} for every quarantine run."""
+    runs = {}
+    for r in records:
+        rid = r.get("run")
+        if r.get("event") == "trash-run":
+            runs[rid] = {"run": rid, "ts": r.get("ts", ""), "trash_dir": r["trash_dir"],
+                         "items": {}}
+        elif r.get("action") == "aborted" and "path" in r and rid in runs:
+            runs[rid]["items"].pop(r["path"], None)
+        elif r.get("action") == "trash" and "path" in r:
+            if rid not in runs and r.get("moved_to", "").endswith(r["path"]):
+                # journal written by ncdu-clean 0.1: derive the quarantine folder
+                runs[rid] = {"run": rid, "ts": r.get("ts", ""), "items": {},
+                             "trash_dir": r["moved_to"][:-len(r["path"])]}
+            if rid in runs:
+                runs[rid]["items"][r["path"]] = r
+    return {k: v for k, v in runs.items() if v["items"]}
+
+
+def top_level(paths):
+    """Keep only the paths that have no ancestor in the collection."""
+    known = set(paths)
+    out = []
+    for p in paths:
+        q = os.path.dirname(p)
+        while q not in ("", "/") and q not in known:
+            q = os.path.dirname(q)
+        if q in ("", "/"):
+            out.append(p)
+    return sorted(out)
+
+
+def restore_tree(src, dst, moved, conflicts):
+    """Move src back to dst. Never overwrites: existing directories are merged."""
+    if not os.path.lexists(dst):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.move(src, dst)
+        moved.append(dst)
+    elif (os.path.isdir(src) and not os.path.islink(src)
+          and os.path.isdir(dst) and not os.path.islink(dst)):
+        for name in sorted(os.listdir(src)):
+            restore_tree(os.path.join(src, name), os.path.join(dst, name), moved, conflicts)
+        try:
+            os.rmdir(src)
+        except OSError:
+            pass
+    else:
+        conflicts.append(dst)
+
+
+def prune_empty(path, stop):
+    """Remove empty directories from path up to (and including) stop."""
+    while path.startswith(stop) and len(path) >= len(stop):
+        try:
+            os.rmdir(path)
+        except OSError:
+            return
+        if path == stop:
+            return
+        path = os.path.dirname(path)
+
+
+def resolve_run(arg, runs):
+    if arg == "last":
+        return max(runs, key=lambda k: runs[k]["ts"])
+    matches = [k for k in runs if k == arg or k.startswith(arg)]
+    if len(matches) == 1:
+        return matches[0]
+    die(_("unknown or ambiguous run: {run} (list them with: ncdu-clean restore)").format(run=arg))
+
+
+def run_state(run):
+    tdir = run["trash_dir"]
+    tops = top_level(list(run["items"]))
+    present = [t for t in tops if os.path.lexists(os.path.join(tdir, t.lstrip("/")))]
+    if not present:
+        return _("nothing left (restored or emptied)")
+    if len(present) < len(tops):
+        return _("partly restored")
+    return _("in quarantine")
+
+
+def cmd_restore(a):
+    log_path = a.log or default_log()
+    runs = trash_runs(read_journal(log_path))
+    if not runs:
+        die(_("no quarantine run found in {path}").format(path=log_path))
+
+    if not a.run:  # list
+        c_run, c_date, c_files, c_size, c_state = (_("RUN"), _("DATE"), _("FILES"),
+                                                   _("SIZE"), _("STATE"))
+        print(f"{c_run:<24} {c_date:<17} {c_files:>7} {c_size:>10}  {c_state}")
+        for rid in sorted(runs, key=lambda k: runs[k]["ts"]):
+            run = runs[rid]
+            files = [r for r in run["items"].values() if r["type"] != "dir"]
+            when = run["ts"][:16].replace("T", " ")
+            print(f"{rid:<24} {when:<17} {len(files):>7} "
+                  f"{human(sum(r['size'] for r in files)):>10}  {run_state(run)}")
+        print("\n" + _("Restore a whole run:   ncdu-clean restore RUN --yes"))
+        print(_("Restore only some paths: ncdu-clean restore RUN /original/path... --yes"))
+        return 0
+
+    rid = resolve_run(a.run, runs)
+    run = runs[rid]
+    tdir = run["trash_dir"]
+    targets = [normalize(p) for p in a.paths] if a.paths else top_level(list(run["items"]))
+
+    plan, missing = [], 0
+    for dst in targets:
+        src = os.path.join(tdir, dst.lstrip("/"))
+        if not os.path.lexists(src):
+            print(_("MISSING      {path}: not in the quarantine of this run").format(path=dst),
+                  file=sys.stderr)
+            missing += 1
+        else:
+            plan.append((src, dst))
+
+    if not a.yes:
+        for src, dst in plan:
+            files = [1 for _p, st in walk_disk(src) if not stat.S_ISDIR(st.st_mode)]
+            print(_("[simulation] {path}  ({files})").format(path=dst, files=fmt_files(len(files))))
+        print("\n" + _("{paths} to restore, {missing} missing.").format(
+            paths=fmt_paths(len(plan)), missing=missing))
+        print(_("Simulation only: add --yes to act."))
+        return 1 if missing else 0
+
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(log_path)), mode=0o700, exist_ok=True)
+        logfh = open(log_path, "a", encoding="utf-8", errors="surrogateescape")
+    except OSError as e:
+        die(_("journal not writable ({path}: {err}). Nothing was restored.")
+            .format(path=log_path, err=e.strerror))
+    new_run = datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = str(os.getuid())
+
+    done = conflicts_total = failed = 0
+    for src, dst in plan:
+        moved, conflicts = [], []
+        try:
+            restore_tree(src, dst, moved, conflicts)
+        except OSError as e:
+            print(_("FAILED       {path}: {why}").format(path=dst, why=e.strerror), file=sys.stderr)
+            failed += 1
+            continue
+        finally:
+            for top in moved:
+                for p, st in walk_disk(top):
+                    logfh.write(json.dumps({
+                        "ts": now_iso(), "run": new_run, "user": user, "action": "restore",
+                        "from_run": rid, "path": p, "type": kind(st.st_mode),
+                        "size": st.st_size, "mtime": int(st.st_mtime)}, ensure_ascii=False) + "\n")
+            logfh.flush()
+            os.fsync(logfh.fileno())
+        for c in conflicts:
+            print(_("CONFLICT     {path}: already exists, left in quarantine").format(path=c),
+                  file=sys.stderr)
+        conflicts_total += len(conflicts)
+        if moved:
+            print(_("RESTORED     {path}").format(path=dst))
+            done += 1
+            prune_empty(os.path.dirname(src), tdir)
+    logfh.close()
+    print("\n" + _("{paths} restored, {conflicts} conflicts, {missing} missing, {failed} failed.")
+          .format(paths=fmt_paths(done), conflicts=conflicts_total, missing=missing, failed=failed))
+    return 1 if (conflicts_total or missing or failed) else 0
+
+
+def cmd_log(a):
+    path = a.log or default_log()
+    if not os.path.exists(path):
+        die(_("no journal at {path}").format(path=path))
+    rows = [r for r in read_journal(path) if "path" in r]
+    latest = {}
+    for r in rows:
+        latest[(r.get("run"), r["path"])] = r
+    rows = [r for r in rows
+            if latest[(r.get("run"), r["path"])] is r and r.get("action") != "aborted"]
+    if a.grep:
+        rows = [r for r in rows if a.grep in r["path"]]
+    if a.last:
+        rows = rows[-a.last:]
+    for r in rows:
+        mark = "/" if r.get("type") == "dir" else ""
+        size = "-" if mark else human(r.get("size", 0))
+        print(f"{r['ts']}  {r['action']:<8}  {size:>10}  {r['path']}{mark}")
+
+
+# --- flat listing --------------------------------------------------------------
+
+def cmd_list(a):
+    root = load_cli(a.export)
+    out = []
+    collect(root, None, a.apparent, out)
+    rows = [r for r in out if (a.dirs or not r[1]) and r[2] >= a.min_size]
+    rows.sort(key=lambda r: r[2], reverse=True)
+    if a.top:
+        rows = rows[:a.top]
+    end = "\0" if a.null else "\n"
+    for path, is_dir, size in rows:
+        sys.stdout.write(f"{human(size):>10}\t{path}{'/' if is_dir else ''}{end}")
+
+
+def read_paths(a):
+    paths = list(a.paths)
+    if a.from_file:
+        if a.from_file == "-":
+            raw = sys.stdin.buffer.read()
+        else:
+            try:
+                with open(a.from_file, "rb") as fh:
+                    raw = fh.read()
+            except OSError as e:
+                die(_("cannot read {path}: {err}").format(path=a.from_file, err=e.strerror))
+        sep = b"\0" if a.null else b"\n"
+        paths += [os.fsdecode(x) for x in raw.split(sep) if x]
+    return [normalize(p) for p in paths]
+
+
+def cmd_rm(a):
+    paths = read_paths(a)
+    if not paths:
+        die(_("no path given (arguments or --from)"))
+    scan = load_cli(a.export) if a.export else None
+    if scan is None:
+        warn(_("no --export: freshness is not checked (advised: ncdu -e -o scan.json /path)"))
+    rc, _gone = run_removal(paths, scan, a.recursive, a.trash, a.yes, a.log or default_log())
+    return rc
+
+
+# --- interactive browser (curses) ----------------------------------------------
+
+HAS_COLOR = False
+
+
+def setup_curses():
+    import curses
+    global HAS_COLOR
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    HAS_COLOR = False
+    if curses.has_colors():
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_RED, -1)
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)
+        curses.init_pair(3, curses.COLOR_CYAN, -1)
+        HAS_COLOR = True
+
+
+class LoadScreen:
+    """ncdu-style progress box, drawn while the export is loaded."""
+
+    def __init__(self, scr, name):
+        self.scr, self.name, self.last = scr, name, 0.0
+        scr.nodelay(True)
+
+    def __call__(self, phase, frac, items, size, current):
+        if self.scr.getch() in (ord("q"), ord("Q")):
+            raise Aborted()
+        now = time.monotonic()
+        if now - self.last < 0.08 and frac < 1:
+            return
+        self.last = now
+        label = _("Reading file…") if phase == "read" else _("Analysing…")
+        lines = []
+        if items:
+            lines.append(_("Total items: {n}   size: {size}").format(n=items, size=human(size)))
+            lines.append(_("Current item: {path}").format(path=current))
+        self.draw(label, frac, lines)
+
+    def draw(self, label, frac, lines, hint=True):
+        import curses
+        scr = self.scr
+        h, w = scr.getmaxyx()
+        scr.erase()
+        scr.addnstr(0, 0, (" ncdu-clean · " + self.name).ljust(max(w - 1, 1)),
+                    max(w - 1, 1), curses.A_REVERSE)
+        scr.noutrefresh()
+        if h >= 12 and w >= 44:
+            bw, bh = min(w - 4, 96), 9
+            win = curses.newwin(bh, bw, max(2, (h - bh) // 2), (w - bw) // 2)
+            win.box()
+            win.addnstr(0, 2, " " + _("Loading…") + " ", bw - 4, curses.A_BOLD)
+            win.addnstr(2, 2, label, bw - 4)
+            if frac is not None:
+                barw = bw - 12
+                filled = int(barw * min(frac, 1.0))
+                win.addnstr(3, 2, "[" + "#" * filled + " " * (barw - filled) + f"] {frac * 100:3.0f}%",
+                            bw - 4)
+            for i, line in enumerate(lines[:2]):
+                win.addnstr(5 + i, 2, line, bw - 4)
+            if hint:
+                text = _("Press q to abort")
+                win.addnstr(bh - 2, bw - len(text) - 3, text, len(text))
+            win.noutrefresh()
+        else:
+            scr.addnstr(2, 0, label + (f" {frac * 100:.0f}%" if frac is not None else ""),
+                        max(w - 1, 1))
+            scr.noutrefresh()
+        curses.doupdate()
+
+
+class Browser:
+    """ncdu-like navigation in an export: mark things, then choose what to do (key x)."""
+
+    def help_lines(self):
+        return [
+            _("Navigation"),
+            _("  Up Down / j k    move                     PgUp PgDn / g G   page, top, bottom"),
+            _("  Right Enter / l  open directory           Left Backspace / h  parent directory"),
+            "",
+            _("Selection"),
+            _("  Space            mark / unmark (a file, or a whole directory)"),
+            _("  [*] marked directly   [+] covered by a marked directory above"),
+            _("  c                clear the selection"),
+            _("  x                act on the selection: simulate it, then delete,"),
+            _("                   quarantine it or save the list to a file"),
+            "",
+            _("Display"),
+            _("  s  sort by size    n  sort by name    a  disk usage / file size"),
+            _("  q  quit            ?  this help"),
+            "",
+            _("Sizes: 'disk usage' is the space really taken on disk (what you get back);"),
+            _("'file size' is the length of the content. Small files take a whole block."),
+            _("Every deletion is checked against the scan and written to the journal."),
+        ]
+
+    def __init__(self, root, scan_name, out, log_path):
+        self.root, self.scan_name, self.out, self.log_path = root, scan_name, out, log_path
+        self.apparent = False
+        self.stack = [root]
+        self.parts = [info_of(root)["name"]]
+        self.cursor = self.top = 0
+        self.saved_pos = []
+        self.sort = "size"
+        self.marked = {}      # path -> export node (None if unknown)
+        self.msg = ""
+        self.recompute()
+
+    def recompute(self):
+        self.disk, self.app = {}, {}
+        compute_sizes(self.root, self.disk, self.app)
+
+    @property
+    def sizes(self):
+        return self.app if self.apparent else self.disk
+
+    @property
+    def cwd(self):
+        return os.path.join(*self.parts)
+
+    def marked_size(self):
+        return sum(self.sizes.get(id(n), 0) for n in self.marked.values() if n is not None)
+
+    def load_marked(self, paths):
+        for p in paths:
+            self.marked[p] = find(self.root, p)
+
+    def save(self):
+        if self.out:
+            write_list(self.out, self.marked)
+
+    def covering(self, path):
+        parent = os.path.dirname(path)
+        while parent and parent != "/":
+            if parent in self.marked:
+                return parent
+            parent = os.path.dirname(parent)
+        return None
+
+    def state(self, path):
+        if path in self.marked:
+            return "direct"
+        return "covered" if self.covering(path) else None
+
+    def entries(self):
+        cwd, rows = self.cwd, []
+        for c in children_of(self.stack[-1]):
+            name = info_of(c)["name"]
+            rows.append((name, os.path.join(cwd, name), c, isinstance(c, list),
+                         self.sizes.get(id(c), 0)))
+        if self.sort == "name":
+            rows.sort(key=lambda r: (not r[3], r[0].lower()))
+        else:
+            rows.sort(key=lambda r: r[4], reverse=True)
+        return rows
+
+    def toggle(self, path, node):
+        if "\n" in path:
+            self.msg = _("name contains a newline: not supported")
+            return
+        if path in self.marked:
+            del self.marked[path]
+            self.msg = _("unmarked")
+        else:
+            cov = self.covering(path)
+            if cov:
+                self.msg = _("already covered by {path}: unmark it first").format(path=cov)
+                return
+            prefix = path + "/"
+            for p in [p for p in self.marked if p.startswith(prefix)]:
+                del self.marked[p]     # now included in this directory
+            self.marked[path] = node
+            self.msg = _("marked")
+        self.save()
+
+    # -- keeping the in-memory tree in sync after a removal --
+
+    def remove_node(self, path):
+        parent = find(self.root, os.path.dirname(path))
+        if not isinstance(parent, list):
+            return
+        name = os.path.basename(path)
+        for i, c in enumerate(parent):
+            if i and info_of(c).get("name") == name:   # parent[0] is the directory's own info
+                del parent[i]
+                return
+
+    def restore_view(self):
+        node, stack, parts = self.root, [self.root], [self.parts[0]]
+        for name in self.parts[1:]:
+            nxt = next((c for c in children_of(node)
+                        if isinstance(c, list) and info_of(c).get("name") == name), None)
+            if nxt is None:
+                break
+            stack.append(nxt)
+            parts.append(name)
+            node = nxt
+        self.stack, self.parts = stack, parts
+        self.saved_pos = self.saved_pos[:len(stack) - 1]
+
+    def after_removal(self, gone):
+        for p in sorted(gone, key=len, reverse=True):
+            self.remove_node(p)
+        for p in [p for p in self.marked if find(self.root, p) is None]:
+            del self.marked[p]
+        self.recompute()
+        self.restore_view()
+        self.save()
+
+    def actions(self, scr):
+        """Leave curses, show the simulation, let the user choose what to do."""
+        import curses
+        if not self.marked:
+            self.msg = _("nothing marked (Space to mark)")
+            return
+        paths = sorted(self.marked)
+        curses.def_prog_mode()
+        curses.endwin()
+        try:
+            print("\n" + _("=== Selection: {paths} ===").format(paths=fmt_paths(len(paths))) + "\n")
+            run_removal(paths, self.root, True, None, False, self.log_path, hint=False)
+            print("\n" + _("What do you want to do with this selection?"))
+            print(_("  [d] delete permanently"))
+            print(_("  [q] quarantine (moved aside, can be restored)"))
+            print(_("  [f] save the list to a file"))
+            print(_("  [Enter] go back without doing anything"))
+            choice = input("> ").strip().lower()
+            gone = []
+            if choice == "d":
+                answer = input(_("Delete {paths} permanently? Type \"{yes}\": ").format(
+                    paths=fmt_paths(len(paths)), yes=_("yes"))).strip().lower()
+                if answer in (_("yes").lower(), "yes"):
+                    _rc, gone = run_removal(paths, self.root, True, None, True, self.log_path)
+                else:
+                    print(_("Cancelled."))
+            elif choice == "q":
+                default = default_trash()
+                dest = input(_("Quarantine folder [{default}]: ").format(default=default)).strip() \
+                    or default
+                answer = input(_("Quarantine {paths}? Type \"{yes}\": ").format(
+                    paths=fmt_paths(len(paths)), yes=_("yes"))).strip().lower()
+                if answer in (_("yes").lower(), "yes"):
+                    _rc, gone = run_removal(paths, self.root, True, dest, True, self.log_path)
+                else:
+                    print(_("Cancelled."))
+            elif choice == "f":
+                name = input(_("File [selection.list]: ")).strip() or "selection.list"
+                try:
+                    write_list(name, self.marked)
+                    print(_("{paths} written to {name}").format(
+                        paths=fmt_paths(len(self.marked)), name=name))
+                except OSError as e:
+                    print(_("Cannot write: {err}").format(err=e.strerror))
+            if gone:
+                self.after_removal(gone)
+            input("\n" + _("Press Enter to go back to the browser..."))
+        except (EOFError, KeyboardInterrupt):
+            pass
+        scr.clear()
+        scr.refresh()
+
+    def draw(self, scr):
+        import curses
+        scr.erase()
+        h, w = scr.getmaxyx()
+        if h < 6 or w < 40:
+            scr.addnstr(0, 0, _("Terminal too small"), max(w - 1, 1))
+            scr.refresh()
+            return
+        rows = self.entries()
+        n, body = len(rows), h - 4
+        self.cursor = max(0, min(self.cursor, n - 1)) if n else 0
+        if self.cursor < self.top:
+            self.top = self.cursor
+        if self.cursor >= self.top + body:
+            self.top = self.cursor - body + 1
+        mode = _("file size") if self.apparent else _("disk usage")
+        sort = _("name") if self.sort == "name" else _("size")
+        scr.addnstr(0, 0, _(" ncdu-clean · {name} · size: {mode} (a: switch) · sort: {sort}")
+                    .format(name=self.scan_name, mode=mode, sort=sort).ljust(w - 1),
+                    w - 1, curses.A_REVERSE)
+        scr.addnstr(1, 0, f" {self.cwd}", w - 1, curses.A_BOLD)
+        biggest = max((r[4] for r in rows), default=0) or 1
+        if not rows:
+            scr.addnstr(2, 2, _("(empty directory)"), w - 3)
+        for i, (name, path, node, is_dir, size) in enumerate(rows[self.top:self.top + body]):
+            st = self.state(path)
+            box = {"direct": "[*]", "covered": "[+]"}.get(st, "[ ]")
+            bar = "#" * int(round(10 * size / biggest))
+            line = f" {box} {human(size):>9} [{bar:<10}] {name}{'/' if is_dir else ''}"
+            attr = curses.A_NORMAL
+            if HAS_COLOR:
+                attr |= curses.color_pair(1 if st == "direct" else 2 if st == "covered"
+                                          else 3 if is_dir else 0)
+            if st == "direct":
+                attr |= curses.A_BOLD
+            if self.top + i == self.cursor:
+                attr |= curses.A_REVERSE
+            scr.addnstr(2 + i, 0, line.ljust(w - 1), w - 1, attr)
+        status = _(" {count} marked, {size}").format(count=len(self.marked),
+                                                    size=human(self.marked_size()))
+        if self.marked:
+            status += _("  (x: act on them)")
+        if self.msg:
+            status += f"   · {self.msg}"
+        scr.addnstr(h - 2, 0, status.ljust(w - 1), w - 1, curses.A_BOLD)
+        scr.addnstr(h - 1, 0, _(" arrows/Enter navigate · Space mark · x act · c clear · "
+                                "s/n sort · a size mode · ? help · q quit"), w - 1)
+        scr.refresh()
+
+    def show_help(self, scr):
+        scr.erase()
+        h, w = scr.getmaxyx()
+        lines = self.help_lines()
+        for i, line in enumerate(lines[:h - 2]):
+            scr.addnstr(i + 1, 2, line, max(w - 3, 1))
+        scr.addnstr(min(len(lines) + 2, h - 1), 2, _("(press any key to go back)"), max(w - 3, 1))
+        scr.refresh()
+        scr.getch()
+
+    def run(self, scr):
+        import curses
+        scr.nodelay(False)
+        while True:
+            self.draw(scr)
+            k = scr.getch()
+            h = scr.getmaxyx()[0]
+            rows = self.entries()
+            self.msg = ""
+            if k == ord("q"):
+                return
+            elif k in (curses.KEY_DOWN, ord("j")):
+                self.cursor += 1
+            elif k in (curses.KEY_UP, ord("k")):
+                self.cursor -= 1
+            elif k == curses.KEY_NPAGE:
+                self.cursor += h - 4
+            elif k == curses.KEY_PPAGE:
+                self.cursor -= h - 4
+            elif k in (curses.KEY_HOME, ord("g")):
+                self.cursor = 0
+            elif k in (curses.KEY_END, ord("G")):
+                self.cursor = len(rows) - 1
+            elif k in (curses.KEY_RIGHT, ord("l"), 10, 13, curses.KEY_ENTER):
+                if rows and rows[self.cursor][3]:
+                    self.saved_pos.append((self.cursor, self.top))
+                    self.stack.append(rows[self.cursor][2])
+                    self.parts.append(rows[self.cursor][0])
+                    self.cursor = self.top = 0
+            elif k in (curses.KEY_LEFT, ord("h"), curses.KEY_BACKSPACE, 127, 8):
+                if len(self.stack) > 1:
+                    self.stack.pop()
+                    self.parts.pop()
+                    self.cursor, self.top = self.saved_pos.pop()
+            elif k == ord(" "):
+                if rows:
+                    _name, path, node, _isdir, _size = rows[self.cursor]
+                    self.toggle(path, node)
+                    self.cursor += 1
+            elif k == ord("x"):
+                self.actions(scr)
+            elif k == ord("c"):
+                if self.marked:
+                    self.msg = _("Clear the whole selection? (y/n)")
+                    self.draw(scr)
+                    if scr.getch() in (ord("y"), ord("Y"), ord(_("y")[0])):
+                        self.marked.clear()
+                        self.save()
+                        self.msg = _("selection cleared")
+                    else:
+                        self.msg = ""
+            elif k == ord("s"):
+                self.sort = "size"
+            elif k == ord("n"):
+                self.sort = "name"
+            elif k == ord("a"):
+                self.apparent = not self.apparent
+            elif k == ord("?"):
+                self.show_help(scr)
+
+
+def write_list(path, marked):
+    """Write the list of paths (one per line), atomically."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as fh:
+        for p in sorted(marked):
+            fh.write(p + "\n")
+    os.replace(tmp, path)
+
+
+def cmd_browse(a):
+    import curses
+    import locale
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        die(_("browse needs an interactive terminal"))
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass  # locale not generated on this system: keep the default
+    os.environ.setdefault("ESCDELAY", "25")
+
+    def main(scr):
+        setup_curses()
+        screen = LoadScreen(scr, os.path.basename(a.export))
+        try:
+            root = load_export(a.export, screen)
+            screen.draw(_("Computing sizes…"), None, [], hint=False)
+            b = Browser(root, os.path.basename(a.export), a.out, a.log or default_log())
+            if a.out and os.path.exists(a.out):
+                with open(a.out, "rb") as fh:
+                    b.load_marked([normalize(os.fsdecode(x)) for x in fh.read().split(b"\n") if x])
+        except Aborted:
+            return None
+        b.run(scr)
+        return b
+
+    try:
+        b = curses.wrapper(main)
+    except ExportError as e:
+        die(str(e))
+    if b is None:
+        print(_("Aborted."))
+    elif b.marked:
+        if a.out:
+            print(_("{paths} still marked, kept in {name}").format(
+                paths=fmt_paths(len(b.marked)), name=a.out))
+        else:
+            print(_("{paths} marked but not processed: nothing was done. "
+                    "(In the browser, x lets you act; -o FILE keeps the selection.)")
+                  .format(paths=fmt_paths(len(b.marked))))
+    return 0
+
+
+# --- command line --------------------------------------------------------------
+
+def build_parser():
+    description = _(
+        "ncdu-clean: delete files found with ncdu, and keep a record of what was removed.\n"
+        "\n"
+        "Commands:\n"
+        "  browse EXPORT   browse like ncdu, mark items, then choose what to do with them\n"
+        "  rm PATH...      delete (or quarantine) after checks, and journal it (for scripts)\n"
+        "  log             show the journal of deletions\n"
+        "  restore [RUN]   list quarantine runs, or put them back where they came from\n"
+        "  list EXPORT     flat list, biggest first (for scripts, fzf...)\n"
+        "\n"
+        "Typical workflow:\n"
+        "  ncdu -e -o scan.json /var       # 1. scan (-e adds modification dates)\n"
+        "  ncdu-clean browse scan.json     # 2. Space: mark; x: choose (delete / quarantine / list)\n"
+        "  ncdu-clean log                  # 3. find out what was deleted\n"
+        "  ncdu-clean restore              # 4. undo a quarantine, in whole or in part\n")
+    epilog = _("Default journal: ~/.local/state/ncdu-clean/deleted.jsonl "
+               "(/var/log/ncdu-clean.jsonl for root), or $NCDU_CLEAN_LOG.")
+    p = argparse.ArgumentParser(prog="ncdu-clean", description=description, epilog=epilog,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"ncdu-clean {__version__}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    br = sub.add_parser("browse", help=_("browse an export, mark, then choose what to do"))
+    br.add_argument("export")
+    br.add_argument("-o", "--out", metavar=_("FILE"),
+                    help=_("keep the selection in FILE as you go (optional; reloaded if it exists)"))
+    br.add_argument("--log", metavar=_("FILE"), help=_("journal of deletions"))
+    br.set_defaults(func=cmd_browse)
+
+    ls = sub.add_parser("list", help=_("flat list of the files of an export"))
+    ls.add_argument("export")
+    ls.add_argument("--dirs", action="store_true", help=_("include directories (cumulative size)"))
+    ls.add_argument("--min-size", type=parse_size, default=0, metavar=_("SIZE"),
+                    help=_("e.g. 100M"))
+    ls.add_argument("--top", type=int, metavar="N", help=_("only the N biggest"))
+    ls.add_argument("--apparent", action="store_true", help=_("file size instead of disk usage"))
+    ls.add_argument("-0", "--null", action="store_true", help=_("separate lines with NUL"))
+    ls.set_defaults(func=cmd_list)
+
+    rm = sub.add_parser("rm", help=_("delete after checks, with journal"))
+    rm.add_argument("paths", nargs="*", metavar=_("PATH"))
+    rm.add_argument("--from", dest="from_file", metavar=_("FILE"),
+                    help=_("read paths from FILE (\"-\" = standard input)"))
+    rm.add_argument("-0", "--null", action="store_true", help=_("paths separated by NUL"))
+    rm.add_argument("-e", "--export", metavar=_("EXPORT"),
+                    help=_("ncdu export, to check nothing changed since the scan"))
+    rm.add_argument("-r", "--recursive", action="store_true", help=_("allow non-empty directories"))
+    rm.add_argument("--trash", metavar=_("DIR"),
+                    help=_("move into DIR/<run>/... instead of deleting"))
+    rm.add_argument("--log", metavar=_("FILE"), help=_("journal (default: see below)"))
+    rm.add_argument("-y", "--yes", action="store_true", help=_("really act (otherwise simulate)"))
+    rm.set_defaults(func=cmd_rm)
+
+    lg = sub.add_parser("log", help=_("show the journal of deletions"))
+    lg.add_argument("--log", metavar=_("FILE"))
+    lg.add_argument("--grep", metavar=_("TEXT"), help=_("filter on the path"))
+    lg.add_argument("--last", type=int, metavar="N", help=_("only the last N lines"))
+    lg.set_defaults(func=cmd_log)
+
+    rs = sub.add_parser("restore", help=_("list quarantine runs, or restore them"))
+    rs.add_argument("run", nargs="?", metavar=_("RUN"),
+                    help=_("run id (or a prefix, or \"last\"); omit to list the runs"))
+    rs.add_argument("paths", nargs="*", metavar=_("PATH"),
+                    help=_("only restore these original paths (default: the whole run)"))
+    rs.add_argument("--log", metavar=_("FILE"), help=_("journal (default: see below)"))
+    rs.add_argument("-y", "--yes", action="store_true", help=_("really act (otherwise simulate)"))
+    rs.set_defaults(func=cmd_restore)
+    return p
+
+
+def main():
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    a = build_parser().parse_args()
+    sys.exit(a.func(a) or 0)
+
+
+if __name__ == "__main__":
+    main()

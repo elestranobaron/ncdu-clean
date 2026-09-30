@@ -1,0 +1,23 @@
+#!/bin/sh
+# Scan a scratch tree, quarantine a directory, restore it, check the journal.
+set -eu
+export LC_ALL=C.UTF-8
+unset LANGUAGE
+T=$(mktemp -d)
+trap 'rm -rf "$T"' EXIT
+export NCDU_CLEAN_LOG="$T/journal.jsonl"
+mkdir -p "$T/data/sub"
+echo hello > "$T/data/sub/a.txt"
+echo world > "$T/data/b.txt"
+ncdu -0 -e -o "$T/scan.json" "$T/data"
+
+ncdu-clean --version
+ncdu-clean list "$T/scan.json" | grep -q a.txt
+
+ncdu-clean rm -r -e "$T/scan.json" "$T/data/sub" --trash "$T/q" --yes
+[ ! -e "$T/data/sub" ]
+ncdu-clean log | grep -q a.txt
+ncdu-clean restore | grep -q 'in quarantine'
+ncdu-clean restore last --yes
+[ "$(cat "$T/data/sub/a.txt")" = hello ]
+echo "OK"

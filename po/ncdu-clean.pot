@@ -1,0 +1,726 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the ncdu-clean package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: ncdu-clean\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-30 21:12+0200\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
+
+#: ncdu-clean:41
+msgctxt "unit"
+msgid "B"
+msgstr ""
+
+#: ncdu-clean:41
+msgctxt "unit"
+msgid "KiB"
+msgstr ""
+
+#: ncdu-clean:41
+msgctxt "unit"
+msgid "MiB"
+msgstr ""
+
+#: ncdu-clean:42
+msgctxt "unit"
+msgid "GiB"
+msgstr ""
+
+#: ncdu-clean:42
+msgctxt "unit"
+msgid "TiB"
+msgstr ""
+
+#: ncdu-clean:64
+#, python-brace-format
+msgid "warning: {msg}"
+msgstr ""
+
+#: ncdu-clean:76
+#, python-brace-format
+msgid "{n} file"
+msgid_plural "{n} files"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ncdu-clean:80
+#, python-brace-format
+msgid "{n} path"
+msgid_plural "{n} paths"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ncdu-clean:87
+msgid "invalid size: {text!r} (e.g. 100M, 2G)"
+msgstr ""
+
+#: ncdu-clean:199
+#, python-brace-format
+msgid "unreadable export ({path}): {err}"
+msgstr ""
+
+#: ncdu-clean:202
+#, python-brace-format
+msgid "{path} does not look like an ncdu export (made with ncdu -o)"
+msgstr ""
+
+#: ncdu-clean:206
+msgid "the scan must use an absolute path: ncdu -e -o scan.json /path"
+msgstr ""
+
+#: ncdu-clean:224 ncdu-clean:789
+msgid "Reading file…"
+msgstr ""
+
+#: ncdu-clean:224 ncdu-clean:789
+msgid "Analysing…"
+msgstr ""
+
+#: ncdu-clean:226
+#, python-brace-format
+msgid "{n} items"
+msgstr ""
+
+#: ncdu-clean:316
+msgid "top-level path (/, /etc, /var...): refused on principle"
+msgstr ""
+
+#: ncdu-clean:318
+msgid "this is your home directory"
+msgstr ""
+
+#: ncdu-clean:320
+msgid "the quarantine is inside this path"
+msgstr ""
+
+#: ncdu-clean:324
+msgid "does not exist any more"
+msgstr ""
+
+#: ncdu-clean:326 ncdu-clean:348
+#, python-brace-format
+msgid "unreadable ({err})"
+msgstr ""
+
+#: ncdu-clean:332
+msgid "this is the root of the scan"
+msgstr ""
+
+#: ncdu-clean:335
+msgid "not in the export (created since the scan, or outside it)"
+msgstr ""
+
+#: ncdu-clean:338
+msgid "the type changed since the scan"
+msgstr ""
+
+#: ncdu-clean:341
+msgid "modified since the scan"
+msgstr ""
+
+#: ncdu-clean:343
+msgid "size differs from the scan"
+msgstr ""
+
+#: ncdu-clean:350
+msgid "directory is not empty: add -r"
+msgstr ""
+
+#: ncdu-clean:356
+#, python-brace-format
+msgid "created since the scan: {path}"
+msgstr ""
+
+#: ncdu-clean:360
+#, python-brace-format
+msgid "modified since the scan: {path}"
+msgstr ""
+
+#: ncdu-clean:362
+#, python-brace-format
+msgid "size differs from the scan: {path}"
+msgstr ""
+
+#: ncdu-clean:407
+#, python-brace-format
+msgid "ncdu-clean: journal not writable ({path}: {err}). Nothing was deleted."
+msgstr ""
+
+#: ncdu-clean:418
+#, python-brace-format
+msgid "REFUSED      {path}: {why}"
+msgstr ""
+
+#: ncdu-clean:425
+#, python-brace-format
+msgid "[simulation] {path}  {label}"
+msgstr ""
+
+#: ncdu-clean:439 ncdu-clean:472
+#, python-brace-format
+msgid "FAILED       {path}: {why} ({gone}/{count} items gone)"
+msgstr ""
+
+#: ncdu-clean:473
+msgid "partial removal"
+msgstr ""
+
+#: ncdu-clean:477
+msgid "QUARANTINED"
+msgstr ""
+
+#: ncdu-clean:477
+msgid "DELETED"
+msgstr ""
+
+#: ncdu-clean:483
+msgid "to delete"
+msgstr ""
+
+#: ncdu-clean:485
+msgid "quarantined"
+msgstr ""
+
+#: ncdu-clean:485
+msgid "deleted"
+msgstr ""
+
+#: ncdu-clean:486
+#, python-brace-format
+msgid "{paths} {verb} ({size}), {refused} refused, {failed} failed."
+msgstr ""
+
+#: ncdu-clean:490 ncdu-clean:644
+msgid "Simulation only: add --yes to act."
+msgstr ""
+
+#: ncdu-clean:493
+#, python-brace-format
+msgid "Journal: {path}"
+msgstr ""
+
+#: ncdu-clean:495
+#, python-brace-format
+msgid "Quarantine: {path}  (restore with: ncdu-clean restore {run})"
+msgstr ""
+
+#: ncdu-clean:589
+#, python-brace-format
+msgid "unknown or ambiguous run: {run} (list them with: ncdu-clean restore)"
+msgstr ""
+
+#: ncdu-clean:597
+msgid "nothing left (restored or emptied)"
+msgstr ""
+
+#: ncdu-clean:599
+msgid "partly restored"
+msgstr ""
+
+#: ncdu-clean:600
+msgid "in quarantine"
+msgstr ""
+
+#: ncdu-clean:607
+#, python-brace-format
+msgid "no quarantine run found in {path}"
+msgstr ""
+
+#. list
+#: ncdu-clean:610 ncdu-clean:1253
+msgid "RUN"
+msgstr ""
+
+#: ncdu-clean:610
+msgid "DATE"
+msgstr ""
+
+#: ncdu-clean:610
+msgid "FILES"
+msgstr ""
+
+#: ncdu-clean:611 ncdu-clean:1225
+msgid "SIZE"
+msgstr ""
+
+#: ncdu-clean:611
+msgid "STATE"
+msgstr ""
+
+#: ncdu-clean:619
+msgid "Restore a whole run:   ncdu-clean restore RUN --yes"
+msgstr ""
+
+#: ncdu-clean:620
+msgid "Restore only some paths: ncdu-clean restore RUN /original/path... --yes"
+msgstr ""
+
+#: ncdu-clean:632
+#, python-brace-format
+msgid "MISSING      {path}: not in the quarantine of this run"
+msgstr ""
+
+#: ncdu-clean:641
+#, python-brace-format
+msgid "[simulation] {path}  ({files})"
+msgstr ""
+
+#: ncdu-clean:642
+#, python-brace-format
+msgid "{paths} to restore, {missing} missing."
+msgstr ""
+
+#: ncdu-clean:651
+#, python-brace-format
+msgid "journal not writable ({path}: {err}). Nothing was restored."
+msgstr ""
+
+#: ncdu-clean:665
+#, python-brace-format
+msgid "FAILED       {path}: {why}"
+msgstr ""
+
+#: ncdu-clean:678
+#, python-brace-format
+msgid "CONFLICT     {path}: already exists, left in quarantine"
+msgstr ""
+
+#: ncdu-clean:682
+#, python-brace-format
+msgid "RESTORED     {path}"
+msgstr ""
+
+#: ncdu-clean:686
+#, python-brace-format
+msgid ""
+"{paths} restored, {conflicts} conflicts, {missing} missing, {failed} failed."
+msgstr ""
+
+#: ncdu-clean:694
+#, python-brace-format
+msgid "no journal at {path}"
+msgstr ""
+
+#: ncdu-clean:736
+#, python-brace-format
+msgid "cannot read {path}: {err}"
+msgstr ""
+
+#: ncdu-clean:745
+msgid "no path given (arguments or --from)"
+msgstr ""
+
+#: ncdu-clean:748
+msgid ""
+"no --export: freshness is not checked (advised: ncdu -e -o scan.json /path)"
+msgstr ""
+
+#: ncdu-clean:792
+#, python-brace-format
+msgid "Total items: {n}   size: {size}"
+msgstr ""
+
+#: ncdu-clean:793
+#, python-brace-format
+msgid "Current item: {path}"
+msgstr ""
+
+#: ncdu-clean:808
+msgid "Loading…"
+msgstr ""
+
+#: ncdu-clean:818
+msgid "Press q to abort"
+msgstr ""
+
+#: ncdu-clean:833
+msgid "Navigation"
+msgstr ""
+
+#: ncdu-clean:834
+msgid ""
+"  Up Down / j k    move                     PgUp PgDn / g G   page, top, "
+"bottom"
+msgstr ""
+
+#: ncdu-clean:835
+msgid ""
+"  Right Enter / l  open directory           Left Backspace / h  parent "
+"directory"
+msgstr ""
+
+#: ncdu-clean:837
+msgid "Selection"
+msgstr ""
+
+#: ncdu-clean:838
+msgid "  Space            mark / unmark (a file, or a whole directory)"
+msgstr ""
+
+#: ncdu-clean:839
+msgid "  [*] marked directly   [+] covered by a marked directory above"
+msgstr ""
+
+#: ncdu-clean:840
+msgid "  c                clear the selection"
+msgstr ""
+
+#: ncdu-clean:841
+msgid "  x                act on the selection: simulate it, then delete,"
+msgstr ""
+
+#: ncdu-clean:842
+msgid "                   quarantine it or save the list to a file"
+msgstr ""
+
+#: ncdu-clean:844
+msgid "Display"
+msgstr ""
+
+#: ncdu-clean:845
+msgid "  s  sort by size    n  sort by name    a  disk usage / file size"
+msgstr ""
+
+#: ncdu-clean:846
+msgid "  q  quit            ?  this help"
+msgstr ""
+
+#: ncdu-clean:848
+msgid ""
+"Sizes: 'disk usage' is the space really taken on disk (what you get back);"
+msgstr ""
+
+#: ncdu-clean:849
+msgid ""
+"'file size' is the length of the content. Small files take a whole block."
+msgstr ""
+
+#: ncdu-clean:850
+msgid "Every deletion is checked against the scan and written to the journal."
+msgstr ""
+
+#: ncdu-clean:915
+msgid "name contains a newline: not supported"
+msgstr ""
+
+#: ncdu-clean:919
+msgid "unmarked"
+msgstr ""
+
+#: ncdu-clean:923
+#, python-brace-format
+msgid "already covered by {path}: unmark it first"
+msgstr ""
+
+#: ncdu-clean:929
+msgid "marked"
+msgstr ""
+
+#: ncdu-clean:970
+msgid "nothing marked (Space to mark)"
+msgstr ""
+
+#: ncdu-clean:976
+#, python-brace-format
+msgid "=== Selection: {paths} ==="
+msgstr ""
+
+#: ncdu-clean:978
+msgid "What do you want to do with this selection?"
+msgstr ""
+
+#: ncdu-clean:979
+msgid "  [d] delete permanently"
+msgstr ""
+
+#: ncdu-clean:980
+msgid "  [q] quarantine (moved aside, can be restored)"
+msgstr ""
+
+#: ncdu-clean:981
+msgid "  [f] save the list to a file"
+msgstr ""
+
+#: ncdu-clean:982
+msgid "  [Enter] go back without doing anything"
+msgstr ""
+
+#: ncdu-clean:986
+#, python-brace-format
+msgid "Delete {paths} permanently? Type \"{yes}\": "
+msgstr ""
+
+#: ncdu-clean:987 ncdu-clean:988 ncdu-clean:997 ncdu-clean:998
+msgid "yes"
+msgstr ""
+
+#: ncdu-clean:991 ncdu-clean:1001
+msgid "Cancelled."
+msgstr ""
+
+#: ncdu-clean:994
+#, python-brace-format
+msgid "Quarantine folder [{default}]: "
+msgstr ""
+
+#: ncdu-clean:996
+#, python-brace-format
+msgid "Quarantine {paths}? Type \"{yes}\": "
+msgstr ""
+
+#: ncdu-clean:1003
+msgid "File [selection.list]: "
+msgstr ""
+
+#: ncdu-clean:1006
+#, python-brace-format
+msgid "{paths} written to {name}"
+msgstr ""
+
+#: ncdu-clean:1009
+#, python-brace-format
+msgid "Cannot write: {err}"
+msgstr ""
+
+#: ncdu-clean:1012
+msgid "Press Enter to go back to the browser..."
+msgstr ""
+
+#: ncdu-clean:1023
+msgid "Terminal too small"
+msgstr ""
+
+#: ncdu-clean:1033
+msgid "file size"
+msgstr ""
+
+#: ncdu-clean:1033
+msgid "disk usage"
+msgstr ""
+
+#: ncdu-clean:1034
+msgid "name"
+msgstr ""
+
+#: ncdu-clean:1034
+msgid "size"
+msgstr ""
+
+#: ncdu-clean:1035
+#, python-brace-format
+msgid " ncdu-clean · {name} · size: {mode} (a: switch) · sort: {sort}"
+msgstr ""
+
+#: ncdu-clean:1041
+msgid "(empty directory)"
+msgstr ""
+
+#: ncdu-clean:1056
+#, python-brace-format
+msgid " {count} marked, {size}"
+msgstr ""
+
+#: ncdu-clean:1059
+msgid "  (x: act on them)"
+msgstr ""
+
+#: ncdu-clean:1063
+msgid ""
+" arrows/Enter navigate · Space mark · x act · c clear · s/n sort · a size "
+"mode · ? help · q quit"
+msgstr ""
+
+#: ncdu-clean:1073
+msgid "(press any key to go back)"
+msgstr ""
+
+#: ncdu-clean:1120
+msgid "Clear the whole selection? (y/n)"
+msgstr ""
+
+#: ncdu-clean:1122
+msgid "y"
+msgstr ""
+
+#: ncdu-clean:1125
+msgid "selection cleared"
+msgstr ""
+
+#: ncdu-clean:1151
+msgid "browse needs an interactive terminal"
+msgstr ""
+
+#: ncdu-clean:1163
+msgid "Computing sizes…"
+msgstr ""
+
+#: ncdu-clean:1178
+msgid "Aborted."
+msgstr ""
+
+#: ncdu-clean:1181
+#, python-brace-format
+msgid "{paths} still marked, kept in {name}"
+msgstr ""
+
+#: ncdu-clean:1184
+#, python-brace-format
+msgid ""
+"{paths} marked but not processed: nothing was done. (In the browser, x lets "
+"you act; -o FILE keeps the selection.)"
+msgstr ""
+
+#: ncdu-clean:1194
+msgid ""
+"ncdu-clean: delete files found with ncdu, and keep a record of what was "
+"removed.\n"
+"\n"
+"Commands:\n"
+"  browse EXPORT   browse like ncdu, mark items, then choose what to do with "
+"them\n"
+"  rm PATH...      delete (or quarantine) after checks, and journal it (for "
+"scripts)\n"
+"  log             show the journal of deletions\n"
+"  restore [RUN]   list quarantine runs, or put them back where they came "
+"from\n"
+"  list EXPORT     flat list, biggest first (for scripts, fzf...)\n"
+"\n"
+"Typical workflow:\n"
+"  ncdu -e -o scan.json /var       # 1. scan (-e adds modification dates)\n"
+"  ncdu-clean browse scan.json     # 2. Space: mark; x: choose (delete / "
+"quarantine / list)\n"
+"  ncdu-clean log                  # 3. find out what was deleted\n"
+"  ncdu-clean restore              # 4. undo a quarantine, in whole or in "
+"part\n"
+msgstr ""
+
+#: ncdu-clean:1208
+msgid ""
+"Default journal: ~/.local/state/ncdu-clean/deleted.jsonl (/var/log/ncdu-"
+"clean.jsonl for root), or $NCDU_CLEAN_LOG."
+msgstr ""
+
+#: ncdu-clean:1215
+msgid "browse an export, mark, then choose what to do"
+msgstr ""
+
+#: ncdu-clean:1217 ncdu-clean:1219 ncdu-clean:1234 ncdu-clean:1242
+#: ncdu-clean:1247 ncdu-clean:1257
+msgid "FILE"
+msgstr ""
+
+#: ncdu-clean:1218
+msgid "keep the selection in FILE as you go (optional; reloaded if it exists)"
+msgstr ""
+
+#: ncdu-clean:1219
+msgid "journal of deletions"
+msgstr ""
+
+#: ncdu-clean:1222
+msgid "flat list of the files of an export"
+msgstr ""
+
+#: ncdu-clean:1224
+msgid "include directories (cumulative size)"
+msgstr ""
+
+#: ncdu-clean:1226
+msgid "e.g. 100M"
+msgstr ""
+
+#: ncdu-clean:1227
+msgid "only the N biggest"
+msgstr ""
+
+#: ncdu-clean:1228
+msgid "file size instead of disk usage"
+msgstr ""
+
+#: ncdu-clean:1229
+msgid "separate lines with NUL"
+msgstr ""
+
+#: ncdu-clean:1232
+msgid "delete after checks, with journal"
+msgstr ""
+
+#: ncdu-clean:1233 ncdu-clean:1255
+msgid "PATH"
+msgstr ""
+
+#: ncdu-clean:1235
+msgid "read paths from FILE (\"-\" = standard input)"
+msgstr ""
+
+#: ncdu-clean:1236
+msgid "paths separated by NUL"
+msgstr ""
+
+#: ncdu-clean:1237
+msgid "EXPORT"
+msgstr ""
+
+#: ncdu-clean:1238
+msgid "ncdu export, to check nothing changed since the scan"
+msgstr ""
+
+#: ncdu-clean:1239
+msgid "allow non-empty directories"
+msgstr ""
+
+#: ncdu-clean:1240
+msgid "DIR"
+msgstr ""
+
+#: ncdu-clean:1241
+msgid "move into DIR/<run>/... instead of deleting"
+msgstr ""
+
+#: ncdu-clean:1242 ncdu-clean:1257
+msgid "journal (default: see below)"
+msgstr ""
+
+#: ncdu-clean:1243 ncdu-clean:1258
+msgid "really act (otherwise simulate)"
+msgstr ""
+
+#: ncdu-clean:1246
+msgid "show the journal of deletions"
+msgstr ""
+
+#: ncdu-clean:1248
+msgid "TEXT"
+msgstr ""
+
+#: ncdu-clean:1248
+msgid "filter on the path"
+msgstr ""
+
+#: ncdu-clean:1249
+msgid "only the last N lines"
+msgstr ""
+
+#: ncdu-clean:1252
+msgid "list quarantine runs, or restore them"
+msgstr ""
+
+#: ncdu-clean:1254
+msgid "run id (or a prefix, or \"last\"); omit to list the runs"
+msgstr ""
+
+#: ncdu-clean:1256
+msgid "only restore these original paths (default: the whole run)"
+msgstr ""

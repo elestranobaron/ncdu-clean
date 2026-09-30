@@ -1,0 +1,3 @@
+Tests: basic
+Depends: ncdu-clean, ncdu
+Restrictions: allow-stderr

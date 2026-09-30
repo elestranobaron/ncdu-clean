@@ -1,0 +1,781 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the ncdu-clean package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: ncdu-clean 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-30 21:12+0200\n"
+"PO-Revision-Date: 2026-09-30 10:00+0200\n"
+"Last-Translator: \n"
+"Language-Team: French\n"
+"Language: fr\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+
+#: ncdu-clean:41
+msgctxt "unit"
+msgid "B"
+msgstr "o"
+
+#: ncdu-clean:41
+msgctxt "unit"
+msgid "KiB"
+msgstr "Kio"
+
+#: ncdu-clean:41
+msgctxt "unit"
+msgid "MiB"
+msgstr "Mio"
+
+#: ncdu-clean:42
+msgctxt "unit"
+msgid "GiB"
+msgstr "Gio"
+
+#: ncdu-clean:42
+msgctxt "unit"
+msgid "TiB"
+msgstr "Tio"
+
+#: ncdu-clean:64
+#, python-brace-format
+msgid "warning: {msg}"
+msgstr "attention : {msg}"
+
+#: ncdu-clean:76
+#, python-brace-format
+msgid "{n} file"
+msgid_plural "{n} files"
+msgstr[0] "{n} fichier"
+msgstr[1] "{n} fichiers"
+
+#: ncdu-clean:80
+#, python-brace-format
+msgid "{n} path"
+msgid_plural "{n} paths"
+msgstr[0] "{n} chemin"
+msgstr[1] "{n} chemins"
+
+#: ncdu-clean:87
+msgid "invalid size: {text!r} (e.g. 100M, 2G)"
+msgstr "taille invalide : {text!r} (ex. 100M, 2G)"
+
+#: ncdu-clean:199
+#, python-brace-format
+msgid "unreadable export ({path}): {err}"
+msgstr "export illisible ({path}) : {err}"
+
+#: ncdu-clean:202
+#, python-brace-format
+msgid "{path} does not look like an ncdu export (made with ncdu -o)"
+msgstr "{path} ne ressemble pas à un export ncdu (créé avec ncdu -o)"
+
+#: ncdu-clean:206
+msgid "the scan must use an absolute path: ncdu -e -o scan.json /path"
+msgstr ""
+"le scan doit être fait avec un chemin absolu : ncdu -e -o scan.json /chemin"
+
+#: ncdu-clean:224 ncdu-clean:789
+msgid "Reading file…"
+msgstr "Lecture du fichier…"
+
+#: ncdu-clean:224 ncdu-clean:789
+msgid "Analysing…"
+msgstr "Analyse…"
+
+#: ncdu-clean:226
+#, python-brace-format
+msgid "{n} items"
+msgstr "{n} éléments"
+
+#: ncdu-clean:316
+msgid "top-level path (/, /etc, /var...): refused on principle"
+msgstr "chemin de premier niveau (/, /etc, /var...) : refusé par principe"
+
+#: ncdu-clean:318
+msgid "this is your home directory"
+msgstr "c'est votre dossier personnel"
+
+#: ncdu-clean:320
+msgid "the quarantine is inside this path"
+msgstr "la quarantaine est à l'intérieur de ce chemin"
+
+#: ncdu-clean:324
+msgid "does not exist any more"
+msgstr "n'existe plus"
+
+#: ncdu-clean:326 ncdu-clean:348
+#, python-brace-format
+msgid "unreadable ({err})"
+msgstr "illisible ({err})"
+
+#: ncdu-clean:332
+msgid "this is the root of the scan"
+msgstr "c'est la racine du scan"
+
+#: ncdu-clean:335
+msgid "not in the export (created since the scan, or outside it)"
+msgstr "absent de l'export (créé depuis le scan, ou hors du scan)"
+
+#: ncdu-clean:338
+msgid "the type changed since the scan"
+msgstr "le type a changé depuis le scan"
+
+#: ncdu-clean:341
+msgid "modified since the scan"
+msgstr "modifié depuis le scan"
+
+#: ncdu-clean:343
+msgid "size differs from the scan"
+msgstr "taille différente de celle du scan"
+
+#: ncdu-clean:350
+msgid "directory is not empty: add -r"
+msgstr "dossier non vide : ajoutez -r"
+
+#: ncdu-clean:356
+#, python-brace-format
+msgid "created since the scan: {path}"
+msgstr "créé depuis le scan : {path}"
+
+#: ncdu-clean:360
+#, python-brace-format
+msgid "modified since the scan: {path}"
+msgstr "modifié depuis le scan : {path}"
+
+#: ncdu-clean:362
+#, python-brace-format
+msgid "size differs from the scan: {path}"
+msgstr "taille différente de celle du scan : {path}"
+
+#: ncdu-clean:407
+#, python-brace-format
+msgid "ncdu-clean: journal not writable ({path}: {err}). Nothing was deleted."
+msgstr ""
+"ncdu-clean : journal inaccessible ({path} : {err}). Rien n'a été supprimé."
+
+#: ncdu-clean:418
+#, python-brace-format
+msgid "REFUSED      {path}: {why}"
+msgstr "REFUSÉ       {path} : {why}"
+
+#: ncdu-clean:425
+#, python-brace-format
+msgid "[simulation] {path}  {label}"
+msgstr "[simulation] {path}  {label}"
+
+#: ncdu-clean:439 ncdu-clean:472
+#, python-brace-format
+msgid "FAILED       {path}: {why} ({gone}/{count} items gone)"
+msgstr "ÉCHEC        {path} : {why} ({gone}/{count} éléments partis)"
+
+#: ncdu-clean:473
+msgid "partial removal"
+msgstr "suppression partielle"
+
+#: ncdu-clean:477
+msgid "QUARANTINED"
+msgstr "MIS DE CÔTÉ"
+
+#: ncdu-clean:477
+msgid "DELETED"
+msgstr "SUPPRIMÉ"
+
+#: ncdu-clean:483
+msgid "to delete"
+msgstr "à supprimer"
+
+#: ncdu-clean:485
+msgid "quarantined"
+msgstr "mis en quarantaine"
+
+#: ncdu-clean:485
+msgid "deleted"
+msgstr "supprimé(s)"
+
+#: ncdu-clean:486
+#, python-brace-format
+msgid "{paths} {verb} ({size}), {refused} refused, {failed} failed."
+msgstr "{paths} {verb} ({size}), {refused} refusé(s), {failed} en échec."
+
+#: ncdu-clean:490 ncdu-clean:644
+msgid "Simulation only: add --yes to act."
+msgstr "Simulation seulement : ajoutez --yes pour agir."
+
+#: ncdu-clean:493
+#, python-brace-format
+msgid "Journal: {path}"
+msgstr "Journal : {path}"
+
+#: ncdu-clean:495
+#, python-brace-format
+msgid "Quarantine: {path}  (restore with: ncdu-clean restore {run})"
+msgstr "Quarantaine : {path}  (pour restaurer : ncdu-clean restore {run})"
+
+#: ncdu-clean:589
+#, python-brace-format
+msgid "unknown or ambiguous run: {run} (list them with: ncdu-clean restore)"
+msgstr ""
+"opération inconnue ou ambiguë : {run} (pour les lister : ncdu-clean restore)"
+
+#: ncdu-clean:597
+msgid "nothing left (restored or emptied)"
+msgstr "plus rien (restauré ou vidé)"
+
+#: ncdu-clean:599
+msgid "partly restored"
+msgstr "partiellement restauré"
+
+#: ncdu-clean:600
+msgid "in quarantine"
+msgstr "en quarantaine"
+
+#: ncdu-clean:607
+#, python-brace-format
+msgid "no quarantine run found in {path}"
+msgstr "aucune mise en quarantaine trouvée dans {path}"
+
+#. list
+#: ncdu-clean:610 ncdu-clean:1253
+msgid "RUN"
+msgstr "OPÉRATION"
+
+#: ncdu-clean:610
+msgid "DATE"
+msgstr "DATE"
+
+#: ncdu-clean:610
+msgid "FILES"
+msgstr "FICHIERS"
+
+#: ncdu-clean:611 ncdu-clean:1225
+msgid "SIZE"
+msgstr "TAILLE"
+
+#: ncdu-clean:611
+msgid "STATE"
+msgstr "ÉTAT"
+
+#: ncdu-clean:619
+msgid "Restore a whole run:   ncdu-clean restore RUN --yes"
+msgstr "Tout restaurer :             ncdu-clean restore OPÉRATION --yes"
+
+#: ncdu-clean:620
+msgid "Restore only some paths: ncdu-clean restore RUN /original/path... --yes"
+msgstr ""
+"Restaurer certains chemins : ncdu-clean restore OPÉRATION /chemin/d/"
+"origine... --yes"
+
+#: ncdu-clean:632
+#, python-brace-format
+msgid "MISSING      {path}: not in the quarantine of this run"
+msgstr "ABSENT       {path} : pas dans la quarantaine de cette opération"
+
+#: ncdu-clean:641
+#, python-brace-format
+msgid "[simulation] {path}  ({files})"
+msgstr "[simulation] {path}  ({files})"
+
+#: ncdu-clean:642
+#, python-brace-format
+msgid "{paths} to restore, {missing} missing."
+msgstr "{paths} à restaurer, {missing} absent(s)."
+
+#: ncdu-clean:651
+#, python-brace-format
+msgid "journal not writable ({path}: {err}). Nothing was restored."
+msgstr "journal inaccessible ({path} : {err}). Rien n'a été restauré."
+
+#: ncdu-clean:665
+#, python-brace-format
+msgid "FAILED       {path}: {why}"
+msgstr "ÉCHEC        {path} : {why}"
+
+#: ncdu-clean:678
+#, python-brace-format
+msgid "CONFLICT     {path}: already exists, left in quarantine"
+msgstr "CONFLIT      {path} : existe déjà, laissé en quarantaine"
+
+#: ncdu-clean:682
+#, python-brace-format
+msgid "RESTORED     {path}"
+msgstr "RESTAURÉ     {path}"
+
+#: ncdu-clean:686
+#, python-brace-format
+msgid ""
+"{paths} restored, {conflicts} conflicts, {missing} missing, {failed} failed."
+msgstr ""
+"{paths} restauré(s), {conflicts} conflit(s), {missing} absent(s), {failed} "
+"en échec."
+
+#: ncdu-clean:694
+#, python-brace-format
+msgid "no journal at {path}"
+msgstr "pas de journal à {path}"
+
+#: ncdu-clean:736
+#, python-brace-format
+msgid "cannot read {path}: {err}"
+msgstr "impossible de lire {path} : {err}"
+
+#: ncdu-clean:745
+msgid "no path given (arguments or --from)"
+msgstr "aucun chemin donné (arguments ou --from)"
+
+#: ncdu-clean:748
+msgid ""
+"no --export: freshness is not checked (advised: ncdu -e -o scan.json /path)"
+msgstr ""
+"pas d'--export : aucune vérification de fraîcheur (conseillé : ncdu -e -o "
+"scan.json /chemin)"
+
+#: ncdu-clean:792
+#, python-brace-format
+msgid "Total items: {n}   size: {size}"
+msgstr "Éléments : {n}   taille : {size}"
+
+#: ncdu-clean:793
+#, python-brace-format
+msgid "Current item: {path}"
+msgstr "En cours : {path}"
+
+#: ncdu-clean:808
+msgid "Loading…"
+msgstr "Chargement…"
+
+#: ncdu-clean:818
+msgid "Press q to abort"
+msgstr "q pour annuler"
+
+#: ncdu-clean:833
+msgid "Navigation"
+msgstr "Navigation"
+
+#: ncdu-clean:834
+msgid ""
+"  Up Down / j k    move                     PgUp PgDn / g G   page, top, "
+"bottom"
+msgstr ""
+"  Haut Bas / j k   se déplacer              PgUp PgDn / g G   page, début, "
+"fin"
+
+#: ncdu-clean:835
+msgid ""
+"  Right Enter / l  open directory           Left Backspace / h  parent "
+"directory"
+msgstr ""
+"  Droite Entrée / l  ouvrir le dossier      Gauche Retour / h   dossier "
+"parent"
+
+#: ncdu-clean:837
+msgid "Selection"
+msgstr "Sélection"
+
+#: ncdu-clean:838
+msgid "  Space            mark / unmark (a file, or a whole directory)"
+msgstr ""
+"  Espace           marquer / démarquer (un fichier, ou un dossier entier)"
+
+#: ncdu-clean:839
+msgid "  [*] marked directly   [+] covered by a marked directory above"
+msgstr "  [*] marqué directement   [+] couvert par un dossier marqué au-dessus"
+
+#: ncdu-clean:840
+msgid "  c                clear the selection"
+msgstr "  c                vider la sélection"
+
+#: ncdu-clean:841
+msgid "  x                act on the selection: simulate it, then delete,"
+msgstr "  x                agir sur la sélection : la simuler, puis supprimer,"
+
+#: ncdu-clean:842
+msgid "                   quarantine it or save the list to a file"
+msgstr ""
+"                   la mettre en quarantaine ou enregistrer la liste dans un "
+"fichier"
+
+#: ncdu-clean:844
+msgid "Display"
+msgstr "Affichage"
+
+#: ncdu-clean:845
+msgid "  s  sort by size    n  sort by name    a  disk usage / file size"
+msgstr ""
+"  s  tri par taille  n  tri par nom     a  espace disque / taille du fichier"
+
+#: ncdu-clean:846
+msgid "  q  quit            ?  this help"
+msgstr "  q  quitter         ?  cette aide"
+
+#: ncdu-clean:848
+msgid ""
+"Sizes: 'disk usage' is the space really taken on disk (what you get back);"
+msgstr ""
+"Tailles : « espace disque » = place réellement occupée sur le disque (ce que "
+"vous récupérez) ;"
+
+#: ncdu-clean:849
+msgid ""
+"'file size' is the length of the content. Small files take a whole block."
+msgstr ""
+"« taille du fichier » = longueur du contenu. Un petit fichier occupe un bloc "
+"entier."
+
+#: ncdu-clean:850
+msgid "Every deletion is checked against the scan and written to the journal."
+msgstr ""
+"Chaque suppression est vérifiée par rapport au scan et écrite dans le "
+"journal."
+
+#: ncdu-clean:915
+msgid "name contains a newline: not supported"
+msgstr "nom avec retour à la ligne : non supporté"
+
+#: ncdu-clean:919
+msgid "unmarked"
+msgstr "démarqué"
+
+#: ncdu-clean:923
+#, python-brace-format
+msgid "already covered by {path}: unmark it first"
+msgstr "déjà couvert par {path} : démarquez-le d'abord"
+
+#: ncdu-clean:929
+msgid "marked"
+msgstr "marqué"
+
+#: ncdu-clean:970
+msgid "nothing marked (Space to mark)"
+msgstr "rien de marqué (Espace pour marquer)"
+
+#: ncdu-clean:976
+#, python-brace-format
+msgid "=== Selection: {paths} ==="
+msgstr "=== Sélection : {paths} ==="
+
+#: ncdu-clean:978
+msgid "What do you want to do with this selection?"
+msgstr "Que faire de cette sélection ?"
+
+#: ncdu-clean:979
+msgid "  [d] delete permanently"
+msgstr "  [d] supprimer définitivement"
+
+#: ncdu-clean:980
+msgid "  [q] quarantine (moved aside, can be restored)"
+msgstr "  [q] mettre en quarantaine (déplacé, restaurable)"
+
+#: ncdu-clean:981
+msgid "  [f] save the list to a file"
+msgstr "  [f] enregistrer la liste dans un fichier"
+
+#: ncdu-clean:982
+msgid "  [Enter] go back without doing anything"
+msgstr "  [Entrée] revenir sans rien faire"
+
+#: ncdu-clean:986
+#, python-brace-format
+msgid "Delete {paths} permanently? Type \"{yes}\": "
+msgstr "Supprimer définitivement {paths} ? Tapez « {yes} » : "
+
+#: ncdu-clean:987 ncdu-clean:988 ncdu-clean:997 ncdu-clean:998
+msgid "yes"
+msgstr "oui"
+
+#: ncdu-clean:991 ncdu-clean:1001
+msgid "Cancelled."
+msgstr "Annulé."
+
+#: ncdu-clean:994
+#, python-brace-format
+msgid "Quarantine folder [{default}]: "
+msgstr "Dossier de quarantaine [{default}] : "
+
+#: ncdu-clean:996
+#, python-brace-format
+msgid "Quarantine {paths}? Type \"{yes}\": "
+msgstr "Mettre en quarantaine {paths} ? Tapez « {yes} » : "
+
+#: ncdu-clean:1003
+msgid "File [selection.list]: "
+msgstr "Fichier [selection.list] : "
+
+#: ncdu-clean:1006
+#, python-brace-format
+msgid "{paths} written to {name}"
+msgstr "{paths} enregistré(s) dans {name}"
+
+#: ncdu-clean:1009
+#, python-brace-format
+msgid "Cannot write: {err}"
+msgstr "Écriture impossible : {err}"
+
+#: ncdu-clean:1012
+msgid "Press Enter to go back to the browser..."
+msgstr "Entrée pour revenir à la navigation..."
+
+#: ncdu-clean:1023
+msgid "Terminal too small"
+msgstr "Terminal trop petit"
+
+#: ncdu-clean:1033
+msgid "file size"
+msgstr "taille du fichier"
+
+#: ncdu-clean:1033
+msgid "disk usage"
+msgstr "espace disque"
+
+#: ncdu-clean:1034
+msgid "name"
+msgstr "nom"
+
+#: ncdu-clean:1034
+msgid "size"
+msgstr "taille"
+
+#: ncdu-clean:1035
+#, python-brace-format
+msgid " ncdu-clean · {name} · size: {mode} (a: switch) · sort: {sort}"
+msgstr " ncdu-clean · {name} · taille : {mode} (a : changer) · tri : {sort}"
+
+#: ncdu-clean:1041
+msgid "(empty directory)"
+msgstr "(dossier vide)"
+
+#: ncdu-clean:1056
+#, python-brace-format
+msgid " {count} marked, {size}"
+msgstr " {count} marqué(s), {size}"
+
+#: ncdu-clean:1059
+msgid "  (x: act on them)"
+msgstr "  (x : agir dessus)"
+
+#: ncdu-clean:1063
+msgid ""
+" arrows/Enter navigate · Space mark · x act · c clear · s/n sort · a size "
+"mode · ? help · q quit"
+msgstr ""
+" flèches naviguer · Espace marquer · x agir · c vider · s/n tri · a taille "
+"· ? aide · q quitter"
+
+#: ncdu-clean:1073
+msgid "(press any key to go back)"
+msgstr "(une touche pour revenir)"
+
+#: ncdu-clean:1120
+msgid "Clear the whole selection? (y/n)"
+msgstr "Tout démarquer ? (o/n)"
+
+#: ncdu-clean:1122
+msgid "y"
+msgstr "o"
+
+#: ncdu-clean:1125
+msgid "selection cleared"
+msgstr "sélection vidée"
+
+#: ncdu-clean:1151
+msgid "browse needs an interactive terminal"
+msgstr "browse a besoin d'un terminal interactif"
+
+#: ncdu-clean:1163
+msgid "Computing sizes…"
+msgstr "Calcul des tailles…"
+
+#: ncdu-clean:1178
+msgid "Aborted."
+msgstr "Annulé."
+
+#: ncdu-clean:1181
+#, python-brace-format
+msgid "{paths} still marked, kept in {name}"
+msgstr "{paths} encore marqué(s), gardé(s) dans {name}"
+
+#: ncdu-clean:1184
+#, python-brace-format
+msgid ""
+"{paths} marked but not processed: nothing was done. (In the browser, x lets "
+"you act; -o FILE keeps the selection.)"
+msgstr ""
+"{paths} marqué(s) mais non traité(s) : rien n'a été fait. (Dans l'interface, "
+"x permet d'agir ; -o FICHIER conserve la sélection.)"
+
+#: ncdu-clean:1194
+msgid ""
+"ncdu-clean: delete files found with ncdu, and keep a record of what was "
+"removed.\n"
+"\n"
+"Commands:\n"
+"  browse EXPORT   browse like ncdu, mark items, then choose what to do with "
+"them\n"
+"  rm PATH...      delete (or quarantine) after checks, and journal it (for "
+"scripts)\n"
+"  log             show the journal of deletions\n"
+"  restore [RUN]   list quarantine runs, or put them back where they came "
+"from\n"
+"  list EXPORT     flat list, biggest first (for scripts, fzf...)\n"
+"\n"
+"Typical workflow:\n"
+"  ncdu -e -o scan.json /var       # 1. scan (-e adds modification dates)\n"
+"  ncdu-clean browse scan.json     # 2. Space: mark; x: choose (delete / "
+"quarantine / list)\n"
+"  ncdu-clean log                  # 3. find out what was deleted\n"
+"  ncdu-clean restore              # 4. undo a quarantine, in whole or in "
+"part\n"
+msgstr ""
+"ncdu-clean : supprimer des fichiers repérés avec ncdu, en gardant une trace "
+"de ce qui est parti.\n"
+"\n"
+"Commandes :\n"
+"  browse EXPORT   naviguer façon ncdu, marquer des éléments, puis choisir "
+"quoi en faire\n"
+"  rm CHEMIN...    supprimer (ou mettre en quarantaine) après vérification, "
+"avec journal (scripts)\n"
+"  log             afficher le journal des suppressions\n"
+"  restore [OP]    lister les mises en quarantaine, ou les remettre à leur "
+"place d'origine\n"
+"  list EXPORT     liste à plat, du plus gros au plus petit (scripts, "
+"fzf...)\n"
+"\n"
+"Déroulement type :\n"
+"  ncdu -e -o scan.json /var       # 1. scan (-e ajoute les dates de "
+"modification)\n"
+"  ncdu-clean browse scan.json     # 2. Espace : marquer ; x : choisir "
+"(supprimer / quarantaine / liste)\n"
+"  ncdu-clean log                  # 3. retrouver ce qui a été supprimé\n"
+"  ncdu-clean restore              # 4. annuler une quarantaine, en tout ou "
+"en partie\n"
+
+#: ncdu-clean:1208
+msgid ""
+"Default journal: ~/.local/state/ncdu-clean/deleted.jsonl (/var/log/ncdu-"
+"clean.jsonl for root), or $NCDU_CLEAN_LOG."
+msgstr ""
+"Journal par défaut : ~/.local/state/ncdu-clean/deleted.jsonl (/var/log/ncdu-"
+"clean.jsonl pour root), ou $NCDU_CLEAN_LOG."
+
+#: ncdu-clean:1215
+msgid "browse an export, mark, then choose what to do"
+msgstr "naviguer dans un export, marquer, puis choisir quoi en faire"
+
+#: ncdu-clean:1217 ncdu-clean:1219 ncdu-clean:1234 ncdu-clean:1242
+#: ncdu-clean:1247 ncdu-clean:1257
+msgid "FILE"
+msgstr "FICHIER"
+
+#: ncdu-clean:1218
+msgid "keep the selection in FILE as you go (optional; reloaded if it exists)"
+msgstr ""
+"conserver la sélection dans FICHIER au fil de l'eau (facultatif ; rechargée "
+"si le fichier existe)"
+
+#: ncdu-clean:1219
+msgid "journal of deletions"
+msgstr "journal des suppressions"
+
+#: ncdu-clean:1222
+msgid "flat list of the files of an export"
+msgstr "liste à plat des fichiers d'un export"
+
+#: ncdu-clean:1224
+msgid "include directories (cumulative size)"
+msgstr "inclure les dossiers (taille cumulée)"
+
+#: ncdu-clean:1226
+msgid "e.g. 100M"
+msgstr "ex. 100M"
+
+#: ncdu-clean:1227
+msgid "only the N biggest"
+msgstr "seulement les N plus gros"
+
+#: ncdu-clean:1228
+msgid "file size instead of disk usage"
+msgstr "taille du fichier plutôt qu'espace disque"
+
+#: ncdu-clean:1229
+msgid "separate lines with NUL"
+msgstr "séparer les lignes par NUL"
+
+#: ncdu-clean:1232
+msgid "delete after checks, with journal"
+msgstr "supprimer après vérification, avec journal"
+
+#: ncdu-clean:1233 ncdu-clean:1255
+msgid "PATH"
+msgstr "CHEMIN"
+
+#: ncdu-clean:1235
+msgid "read paths from FILE (\"-\" = standard input)"
+msgstr "lire les chemins dans FICHIER (« - » = entrée standard)"
+
+#: ncdu-clean:1236
+msgid "paths separated by NUL"
+msgstr "chemins séparés par NUL"
+
+#: ncdu-clean:1237
+msgid "EXPORT"
+msgstr "EXPORT"
+
+#: ncdu-clean:1238
+msgid "ncdu export, to check nothing changed since the scan"
+msgstr "export ncdu, pour vérifier que rien n'a changé depuis le scan"
+
+#: ncdu-clean:1239
+msgid "allow non-empty directories"
+msgstr "autoriser les dossiers non vides"
+
+#: ncdu-clean:1240
+msgid "DIR"
+msgstr "DOSSIER"
+
+#: ncdu-clean:1241
+msgid "move into DIR/<run>/... instead of deleting"
+msgstr "déplacer dans DOSSIER/<opération>/... au lieu de supprimer"
+
+#: ncdu-clean:1242 ncdu-clean:1257
+msgid "journal (default: see below)"
+msgstr "journal (défaut : voir ci-dessous)"
+
+#: ncdu-clean:1243 ncdu-clean:1258
+msgid "really act (otherwise simulate)"
+msgstr "agir réellement (sinon simulation)"
+
+#: ncdu-clean:1246
+msgid "show the journal of deletions"
+msgstr "afficher le journal des suppressions"
+
+#: ncdu-clean:1248
+msgid "TEXT"
+msgstr "TEXTE"
+
+#: ncdu-clean:1248
+msgid "filter on the path"
+msgstr "filtrer sur le chemin"
+
+#: ncdu-clean:1249
+msgid "only the last N lines"
+msgstr "seulement les N dernières lignes"
+
+#: ncdu-clean:1252
+msgid "list quarantine runs, or restore them"
+msgstr "lister les mises en quarantaine, ou les restaurer"
+
+#: ncdu-clean:1254
+msgid "run id (or a prefix, or \"last\"); omit to list the runs"
+msgstr ""
+"identifiant de l'opération (ou un préfixe, ou « last ») ; sans argument, "
+"liste les opérations"
+
+#: ncdu-clean:1256
+msgid "only restore these original paths (default: the whole run)"
+msgstr "restaurer seulement ces chemins d'origine (défaut : toute l'opération)"

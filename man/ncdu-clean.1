@@ -1,0 +1,188 @@
+.TH NCDU\-CLEAN 1 "September 2026" "ncdu-clean 0.2.0" "User Commands"
+.SH NAME
+ncdu\-clean \- delete files found with ncdu, keeping a journal and a quarantine
+.SH SYNOPSIS
+.B ncdu\-clean browse
+.RI [ options ]
+.I EXPORT
+.br
+.B ncdu\-clean rm
+.RI [ options ]
+.RI [ PATH ...]
+.br
+.B ncdu\-clean log
+.RI [ options ]
+.br
+.B ncdu\-clean restore
+.RI [ options ]
+.RI [ RUN
+.RI [ PATH ...]]
+.br
+.B ncdu\-clean list
+.RI [ options ]
+.I EXPORT
+.SH DESCRIPTION
+.B ncdu\-clean
+works on an export made by
+.BR ncdu (1)
+(\fBncdu \-e \-o scan.json /path\fR).
+It lets you browse the export, mark files and directories, and then choose what
+to do with them: delete them, move them to a quarantine, or save the list.
+The journal entry is written before the file is removed. Quarantined files
+can be put back where they came from.
+.PP
+With an export, each path is checked against that export before removal.
+A file whose size or modification time changed since the scan, or a directory
+that gained files, is refused.
+.B rm
+without \fB\-\-export\fR skips this check and warns.
+Paths at the top of the tree (\fB/\fR, \fB/etc\fR, \fB/var\fR, ...), the home
+directory and the root of the scan are always refused.
+Every action is simulated first; nothing is done without \fB\-\-yes\fR or an
+explicit confirmation in the browser.
+.SH COMMANDS
+.TP
+.B browse \fIEXPORT\fR
+Browse the export like
+.BR ncdu (1).
+Mark items with Space, then press
+.B x
+to simulate the selection and choose: delete permanently, quarantine, or save
+the list to a file.
+Options:
+.RS
+.TP
+.BI \-o " FILE" ", \-\-out " FILE
+Keep the selection in
+.I FILE
+as you go, and reload it if it exists.
+.TP
+.BI \-\-log " FILE"
+Journal to use.
+.RE
+.TP
+.B rm \fIPATH\fR...
+Check, then delete or quarantine the given paths (for scripts).
+Simulation by default.
+Options:
+.RS
+.TP
+.BR \-y ", " \-\-yes
+Really act.
+.TP
+.BI \-e " EXPORT" ", \-\-export " EXPORT
+Check that nothing changed since the scan.
+Without this option, that check is skipped.
+.TP
+.BR \-r ", " \-\-recursive
+Allow non-empty directories.
+.TP
+.BI \-\-trash " DIR"
+Move into
+.IR DIR / RUN /...
+instead of deleting.
+.TP
+.BI \-\-from " FILE"
+Read paths from
+.IR FILE ,
+one per line (\fB\-\fR means standard input).
+.TP
+.BR \-0 ", " \-\-null
+Paths are separated by NUL.
+.TP
+.BI \-\-log " FILE"
+Journal to use.
+.RE
+.TP
+.B log
+Show the journal: date, action, size, path.
+Options:
+.BI \-\-grep " TEXT"
+filters on the path,
+.BI \-\-last " N"
+keeps the last N lines.
+.TP
+.B restore \fR[\fIRUN\fR [\fIPATH\fR...]]
+Without argument, list the quarantine runs with their state.
+With a run identifier (or a prefix, or
+.BR last ),
+put its files back where they came from; with paths, put back only those.
+Nothing is ever overwritten: if the destination exists, the file stays in the
+quarantine and a conflict is reported; existing directories are merged.
+Simulation by default; use
+.B \-\-yes
+to act.
+Directories re-created on the way get default permissions.
+.TP
+.B list \fIEXPORT\fR
+Flat list of the files of an export, biggest first, as
+.IR size <TAB> path .
+Options:
+.BR \-\-dirs ,
+.BI \-\-min\-size " SIZE" ,
+.BI \-\-top " N" ,
+.BR \-\-apparent ,
+.BR \-0 .
+.SH BROWSER KEYS
+.TP
+.BR Up / Down ", " j / k
+Move.
+.TP
+.BR Right / Enter ", " l
+Open the directory.
+.TP
+.BR Left / Backspace ", " h
+Parent directory.
+.TP
+.B Space
+Mark or unmark the item (a whole directory if it is one).
+.B [*]
+is marked, and
+.B [+]
+is covered by a marked directory above.
+.TP
+.B x
+Act on the selection.
+.TP
+.B c
+Clear the selection.
+.TP
+.BR s ", " n
+Sort by size, by name.
+.TP
+.B a
+Switch between disk usage (space really taken, what you get back) and file
+size (length of the content).
+.TP
+.BR ? ", " q
+Help, quit.
+.SH FILES
+.TP
+.I ~/.local/state/ncdu\-clean/deleted.jsonl
+Default journal (\fI/var/log/ncdu\-clean.jsonl\fR for root), one JSON object per
+line and per file.
+.TP
+.I ~/.local/state/ncdu\-clean/quarantine/
+Default quarantine.
+Moving files there does not free disk space.
+.SH ENVIRONMENT
+.TP
+.B NCDU_CLEAN_LOG
+Journal to use when
+.B \-\-log
+is not given.
+.SH EXAMPLES
+.nf
+ncdu \-e \-o scan.json /var
+ncdu\-clean browse scan.json
+ncdu\-clean rm \-r \-e scan.json /var/tmp/old \-\-trash ~/q \-\-yes
+ncdu\-clean restore
+ncdu\-clean restore last /var/tmp/old/file.log \-\-yes
+.fi
+.SH EXIT STATUS
+0 on success; 1 if some path was refused, missing, in conflict or failed; 2 on
+usage or input errors.
+.SH SEE ALSO
+.BR ncdu (1)
+.SH AUTHOR
+Thomas Lloancy

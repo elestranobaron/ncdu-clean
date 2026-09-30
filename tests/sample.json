@@ -1,0 +1,5 @@
+[1,2,{"progname":"ncdu","progver":"1.19","timestamp":1790000000},
+[{"name":"/srv/data","asize":4096,"dsize":4096,"mtime":1790000000},
+[{"name":"logs","asize":4096,"dsize":4096,"mtime":1790000000},
+{"name":"app.log","asize":300000,"dsize":303104,"mtime":1790000000}],
+{"name":"big.bin","asize":5000,"dsize":8192,"mtime":1790000000}]]
