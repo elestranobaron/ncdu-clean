@@ -6,6 +6,10 @@ ncdu\-clean \- delete files found with ncdu, keeping a journal and a quarantine
 .RI [ options ]
 .I EXPORT
 .br
+.B ncdu\-clean suggest
+.RI [ options ]
+.I EXPORT
+.br
 .B ncdu\-clean rm
 .RI [ options ]
 .RI [ PATH ...]
@@ -59,6 +63,57 @@ as you go, and reload it if it exists.
 .TP
 .BI \-\-log " FILE"
 Journal to use.
+.RE
+.TP
+.B suggest \fIEXPORT\fR
+Ask
+.B $NCDU_CLEAN_AI
+for a plan. The command reads a JSON summary of the export on standard
+input and writes a JSON object on standard output:
+.IP
+{"items": [{"path": "/var/tmp/old.log", "action": "delete", "reason": "old log"}]}
+.IP
+.B action
+is
+.B delete
+or
+.BR quarantine .
+On a large export, the forty largest entries are sent (the first level,
+then the biggest names inside those).
+Paths that are not in the export are dropped. A top-level path
+(\fB/\fR, \fB/etc\fR, \fB/var\fR, ...), the home directory and the root of
+the scan are dropped. A directory is dropped when something inside it has
+the other action.
+A user profile directory, \fBpagefile.sys\fR, \fBswapfile.sys\fR, \fBhiberfil.sys\fR,
+and the Windows, System32, SysWOW64 and WinSxS directories are dropped from
+a suggestion. They can still be marked by hand in the browser. The result is printed as JSON when standard output is not a terminal.
+The summary also lists mounted disks (size and free space), removable disks,
+and disks that are present but not mounted.
+The model may name one quarantine folder on a writable mount
+(\fBquarantine_to\fR).
+A folder that is not on a known writable disk, or that overlaps a path in the
+plan, is replaced by the writable disk with the most free space.
+On a terminal, reading the export and waiting for the model are separate
+screens: each shows the phase, a running clock, the disks, and the key you just
+pressed.
+q cancels the wait.
+The model's text is drawn on that screen as it is written.
+The plan then shows the paths and the quarantine folder.
+d deletes the suggested paths, q moves them into that folder (the folder is
+created when it does not exist), and Enter does nothing.
+Both actions ask for confirmation.
+If the model fails, that screen says why. Nothing
+is removed,
+and the journal is not written, until that confirmation.
+Options:
+.RS
+.TP
+.BI \-\-delete\-list " FILE"
+Write the paths to delete, one per line, for
+.BR "rm \-\-from" .
+.TP
+.BI \-\-quarantine\-list " FILE"
+Write the paths to quarantine, one per line.
 .RE
 .TP
 .B rm \fIPATH\fR...
@@ -141,6 +196,10 @@ is marked, and
 .B [+]
 is covered by a marked directory above.
 .TP
+.B p
+Ask for a suggestion and mark it. Nothing is removed. A plan with both
+actions is marked in two passes.
+.TP
 .B x
 Act on the selection.
 .TP
@@ -171,10 +230,32 @@ Moving files there does not free disk space.
 Journal to use when
 .B \-\-log
 is not given.
+.TP
+.B NCDU_CLEAN_AI
+Command run by
+.B suggest
+and by the
+.B p
+key. It reads the JSON summary on standard input and writes the JSON plan
+on standard output.
+.I examples/suggest-openai.py
+in the source tree is such a command for an OpenAI-compatible endpoint.
+It reads
+.BR NCDU_CLEAN_AI_URL ,
+.B NCDU_CLEAN_AI_MODEL
+and, when the endpoint requires one,
+.BR NCDU_CLEAN_AI_KEY .
+The key is sent only to that endpoint. It is not written to the journal.
 .SH EXAMPLES
 .nf
 ncdu \-e \-o scan.json /var
 ncdu\-clean browse scan.json
+NCDU_CLEAN_AI="python3 examples/suggest-openai.py" \\
+NCDU_CLEAN_AI_URL="http://127.0.0.1:11434/v1/chat/completions" \\
+NCDU_CLEAN_AI_MODEL="qwen2.5" \\
+ncdu\-clean suggest scan.json \-\-delete\-list delete.list \-\-quarantine\-list quarantine.list
+ncdu\-clean rm \-r \-e scan.json \-\-from delete.list
+ncdu\-clean rm \-r \-e scan.json \-\-from quarantine.list \-\-trash ~/q
 ncdu\-clean rm \-r \-e scan.json /var/tmp/old \-\-trash ~/q \-\-yes
 ncdu\-clean restore
 ncdu\-clean restore last /var/tmp/old/file.log \-\-yes

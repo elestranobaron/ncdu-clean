@@ -1,5 +1,5 @@
 ncdu-clean (0.2.0-1) unstable; urgency=medium
 
-  * Initial release.
+  * Initial release. (Closes: #1149569)
 
- -- Thomas Lloancy <tlloancy@deter-mi.net>  Wed, 30 Sep 2026 10:00:00 +0200
+ -- Thomas Lloancy <tlloancy@deter-mi.net>  Wed, 30 Sep 2026 23:47:51 +0200

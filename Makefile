@@ -25,6 +25,7 @@ check:
 	python3 -c "import ast; ast.parse(open('ncdu-clean').read())"
 	python3 ncdu-clean --version
 	python3 ncdu-clean list tests/sample.json | grep -q app.log
+	sh tests/suggest.sh
 
 # Refresh the translation template and merge it into each catalogue.
 pot:

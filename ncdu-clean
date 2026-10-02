@@ -9,10 +9,13 @@ import gettext
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
+import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -750,6 +753,820 @@ def cmd_rm(a):
     return rc
 
 
+# --- suggestion ----------------------------------------------------------------
+# NCDU_CLEAN_AI is a command. It reads a JSON summary on stdin and writes a
+# JSON plan on stdout. The plan only fills a selection: removal still goes
+# through rm or the browser, and still requires yes. The command's environment
+# is not copied into the journal.
+
+AI_STDOUT_MAX = 32 << 20
+SUGGEST_ITEMS = 40
+_SYSTEM_FILES = {"pagefile.sys", "swapfile.sys", "hiberfil.sys"}
+_WINDOWS_DIRS = {(), ("system32",), ("syswow64",), ("winsxs",)}
+
+
+def suggestion_block(path):
+    """Reason to keep a path out of a suggestion, or None.
+
+    The browser can still mark it. The suggestion must not offer it."""
+    parts = [part for part in path.split("/") if part]
+    if not parts:
+        return None
+    if parts[-1].lower() in _SYSTEM_FILES:
+        return _("Windows system file")
+    low = [part.lower() for part in parts]
+    if "windows" in low:
+        rest = tuple(low[low.index("windows") + 1:])
+        if rest in _WINDOWS_DIRS:
+            return _("Windows system directory")
+    if "users" in low:
+        rest = low[low.index("users") + 1:]
+        if len(rest) <= 1:
+            return _("user profile directory")
+    return None
+
+
+class SuggestError(Exception):
+    """The suggestion command failed, or its plan is unusable."""
+
+
+class SuggestCancelled(SuggestError):
+    """The user stopped the suggestion while it was still running."""
+
+
+def fmt_clock(seconds):
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+_SKIP_FS = {
+    "proc", "sysfs", "devtmpfs", "devpts", "cgroup", "cgroup2", "pstore",
+    "securityfs", "debugfs", "tracefs", "fusectl", "configfs", "binfmt_misc",
+    "autofs", "mqueue", "hugetlbfs", "ramfs", "bpf", "nsfs", "efivarfs",
+    "rpc_pipefs", "tmpfs", "squashfs", "overlay",
+}
+
+
+def _unescape_mount(text):
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), text)
+
+
+def _block_disk(device):
+    name = os.path.basename(device)
+    if name.startswith(("nvme", "mmcblk")):
+        return re.sub(r"p\d+$", "", name)
+    return re.sub(r"\d+$", "", name)
+
+
+def _sys_flag(path):
+    try:
+        with open(path, encoding="ascii", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def list_storage():
+    """Mounted filesystems and disks that are present but not mounted.
+
+    Sizes come from the filesystem for a mount, and from the kernel for a
+    disk with nothing mounted. A quarantine can only use a writable mount."""
+    rows = []
+    mounted_disks = set()
+    seen = set()
+    try:
+        lines = open("/proc/mounts", encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        device, mount, fs = _unescape_mount(parts[0]), _unescape_mount(parts[1]), parts[2]
+        if fs in _SKIP_FS or not mount.startswith("/") or mount in seen:
+            continue
+        seen.add(mount)
+        try:
+            st = os.statvfs(mount)
+        except OSError:
+            continue
+        total = st.f_frsize * st.f_blocks
+        if total <= 0:
+            continue
+        writable = not bool(st.f_flag & getattr(os, "ST_RDONLY", 1))
+        kind = "disk"
+        if device.startswith("/dev/"):
+            disk = _block_disk(device)
+            mounted_disks.add(disk)
+            if _sys_flag(f"/sys/block/{disk}/removable") == "1":
+                kind = "removable"
+        rows.append({
+            "mount": mount,
+            "device": device,
+            "fs": fs,
+            "size": total,
+            "free": max(st.f_frsize * st.f_bavail, 0),
+            "kind": kind,
+            "writable": writable,
+        })
+    try:
+        names = sorted(os.listdir("/sys/block"))
+    except OSError:
+        names = []
+    for name in names:
+        if name.startswith(("loop", "ram", "fd", "zram", "dm-", "sr")) or name in mounted_disks:
+            continue
+        sectors = _sys_flag(f"/sys/block/{name}/size")
+        try:
+            size = int(sectors) * 512
+        except ValueError:
+            continue
+        if size <= 0:
+            continue
+        removable = _sys_flag(f"/sys/block/{name}/removable") == "1"
+        model = _sys_flag(f"/sys/block/{name}/device/model")
+        rows.append({
+            "mount": "",
+            "device": "/dev/" + name,
+            "fs": "",
+            "size": size,
+            "free": 0,
+            "kind": "removable" if removable else "unmounted",
+            "writable": False,
+            "model": model,
+        })
+    rows.sort(key=lambda row: (not row["mount"], -row["free"], row["mount"] or row["device"]))
+    return rows
+
+
+def mount_of(path, disks):
+    """Longest writable mount that contains path."""
+    path = normalize(path)
+    best = None
+    for disk in disks:
+        mount = disk.get("mount") or ""
+        if not mount:
+            continue
+        if path == mount or path.startswith(mount.rstrip("/") + "/"):
+            if best is None or len(mount) > len(best["mount"]):
+                best = disk
+    return best
+
+
+def disk_useful(disk):
+    """Boot partitions and tiny mounts are not places for a quarantine."""
+    mount = disk.get("mount") or ""
+    if mount == "/boot" or mount.startswith("/boot/"):
+        return False
+    if (disk.get("size") or 0) < 512 * 1024 * 1024:
+        return False
+    return True
+
+
+def disk_title(disk):
+    mount = disk.get("mount") or ""
+    if disk.get("kind") == "removable" or mount.startswith("/media/"):
+        return _("USB")
+    if mount == "/":
+        return _("This computer")
+    if not mount:
+        return (disk.get("model") or disk.get("device") or _("Disk")).strip()
+    name = os.path.basename(mount.rstrip("/")) or mount
+    if re.fullmatch(r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}", name):
+        return _("USB")
+    return name
+
+
+def disk_rows(disks, limit=6, scan_root=None):
+    """Aligned lines: name, free space, size. Return (lines, how many were left out)."""
+    shown = [disk for disk in disks if disk_useful(disk)]
+    scan_mount = mount_of(scan_root, disks) if scan_root else None
+    lines = ["  {name:<16}{free:>10}  {size:>10}".format(
+        name=_("Name"), free=_("Free"), size=_("Size"))]
+    for disk in shown[:limit]:
+        where = disk.get("mount") or disk.get("device") or ""
+        note = ""
+        if scan_mount and disk.get("mount") and disk["mount"] == scan_mount.get("mount"):
+            note = "  " + _("scan is here")
+        elif not disk.get("mount"):
+            note = "  " + _("not mounted")
+        elif not disk.get("writable"):
+            note = "  " + _("read-only")
+        free = human(disk.get("free", 0)) if disk.get("mount") else "—"
+        lines.append("  {name:<16}{free:>10}  {size:>10}  {where}{note}".format(
+            name=disk_title(disk)[:16], free=free, size=human(disk.get("size", 0)),
+            where=where, note=note))
+    return lines, max(0, len(shown) - limit)
+
+
+def build_payload(root, cancel=None, disks=None):
+    """Summary of the export, plus an index of every path in it."""
+    disk, _app = {}, {}
+    compute_sizes(root, disk, _app)
+    index = {}
+    seen = [0]
+
+    def walk(node, parent):
+        seen[0] += 1
+        if cancel and seen[0] % 8192 == 0 and cancel():
+            raise SuggestCancelled(_("suggestion cancelled"))
+        info = info_of(node)
+        path = info["name"] if parent is None else os.path.join(parent, info["name"])
+        path = normalize(path)
+        is_dir = isinstance(node, list)
+        rec = {
+            "path": path,
+            "type": "dir" if is_dir else "file",
+            "size": disk.get(id(node), 0),
+            "node": node,
+        }
+        if "mtime" in info:
+            rec["mtime"] = info["mtime"]
+        index[path] = rec
+        for child in children_of(node):
+            walk(child, path)
+
+    walk(root, None)
+    root_path = normalize(info_of(root)["name"])
+    rows = [index[path] for path in index if path != root_path]
+
+    def depth(path):
+        extra = path[len(root_path):].strip("/")
+        return 0 if not extra else extra.count("/") + 1
+
+    chosen, seen = [], set()
+    for level in (1, 2, 3, 4):
+        level_rows = [rec for rec in rows if depth(rec["path"]) == level]
+        level_rows.sort(key=lambda rec: rec["size"], reverse=True)
+        for rec in level_rows:
+            if rec["path"] in seen or suggestion_block(rec["path"]):
+                continue
+            chosen.append(rec)
+            seen.add(rec["path"])
+            if len(chosen) >= SUGGEST_ITEMS:
+                break
+        if len(chosen) >= SUGGEST_ITEMS:
+            break
+    if len(chosen) < SUGGEST_ITEMS:
+        for rec in sorted(rows, key=lambda rec: rec["size"], reverse=True):
+            if rec["path"] in seen or rec["type"] != "file":
+                continue
+            chosen.append(rec)
+            seen.add(rec["path"])
+            if len(chosen) >= SUGGEST_ITEMS:
+                break
+    items = [{"path": rec["path"], "type": rec["type"], "size": rec["size"]} for rec in chosen]
+    if disks is None:
+        disks = list_storage()
+    public = []
+    for disk in [disk for disk in disks if disk_useful(disk)][:24]:
+        row = {
+            "mount": disk.get("mount") or "",
+            "device": disk.get("device") or "",
+            "fs": disk.get("fs") or "",
+            "size": disk.get("size", 0),
+            "free": disk.get("free", 0),
+            "kind": disk.get("kind") or "disk",
+            "writable": bool(disk.get("writable")),
+        }
+        if disk.get("model"):
+            row["model"] = disk["model"]
+        public.append(row)
+    return {"root": root_path, "total": len(rows), "items": items, "disks": public}, index
+
+
+def ai_argv():
+    raw = os.environ.get("NCDU_CLEAN_AI", "").strip()
+    if not raw:
+        raise SuggestError(_("NCDU_CLEAN_AI is not set"))
+    try:
+        argv = shlex.split(raw)
+    except ValueError as e:
+        raise SuggestError(_("NCDU_CLEAN_AI is not a valid command ({err})").format(err=e))
+    if not argv:
+        raise SuggestError(_("NCDU_CLEAN_AI is not set"))
+    return argv
+
+
+def _split_think(text):
+    """Thinking lines are marked by the example client. The rest is the real error."""
+    think, err = [], []
+    for line in text.splitlines():
+        if line.startswith("THINK\t"):
+            think.append(line[6:])
+        elif line.strip():
+            err.append(line)
+    return "".join(think), "\n".join(err).strip()
+
+
+def run_ai(payload, cancel=None, on_text=None, on_think=None):
+    """Run NCDU_CLEAN_AI. Return the parsed JSON plan. Never writes the journal.
+
+    cancel() is checked while the command runs. A true result stops it.
+    on_text(text) receives the answer as the command writes it.
+    on_think(text) receives thinking text the same way."""
+    import codecs
+    argv = ai_argv()
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    holder = {}
+
+    def pump(stream, on_piece):
+        acc = bytearray()
+        dec = codecs.getincrementaldecoder("utf-8")("replace")
+        shown = []
+        try:
+            while True:
+                block = os.read(stream.fileno(), 256)
+                if not block:
+                    break
+                acc.extend(block)
+                piece = dec.decode(block)
+                if piece and on_piece:
+                    shown.append(piece)
+                    on_piece("".join(shown))
+            tail = dec.decode(b"", final=True)
+            if tail and on_piece:
+                shown.append(tail)
+                on_piece("".join(shown))
+        except Exception as exc:
+            holder["err"] = exc
+        return bytes(acc)
+
+    def read():
+        try:
+            proc = subprocess.Popen(
+                argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                bufsize=0)
+        except OSError as e:
+            holder["err"] = SuggestError(
+                _("cannot run {cmd}: {err}").format(cmd=argv[0], err=e.strerror))
+            return
+        holder["proc"] = proc
+        try:
+            proc.stdin.write(data)
+            proc.stdin.close()
+        except (BrokenPipeError, OSError) as e:
+            proc.kill()
+            proc.wait()
+            holder["err"] = SuggestError(_("cannot run {cmd}: {err}").format(cmd=argv[0], err=e))
+            return
+
+        def watch_think(text):
+            _think, _err = _split_think(text)
+            if on_think and _think:
+                on_think(_think)
+
+        out_box = {}
+        err_box = {}
+
+        def take_out():
+            out_box["b"] = pump(proc.stdout, on_text)
+
+        def take_err():
+            err_box["b"] = pump(proc.stderr, watch_think)
+
+        tout = threading.Thread(target=take_out, daemon=True)
+        terr = threading.Thread(target=take_err, daemon=True)
+        tout.start()
+        terr.start()
+        proc.wait()
+        tout.join()
+        terr.join()
+        holder["out"] = out_box.get("b", b"")
+        holder["stderr"] = err_box.get("b", b"")
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    try:
+        while reader.is_alive():
+            if cancel and cancel():
+                proc = holder.get("proc")
+                if proc is None:
+                    reader.join(0.05)
+                    continue
+                if proc.poll() is None:
+                    proc.kill()
+                reader.join()
+                raise SuggestCancelled(_("suggestion cancelled"))
+            reader.join(0.05)
+    except KeyboardInterrupt:
+        proc = holder.get("proc")
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+        reader.join()
+        raise
+    if "err" in holder:
+        raise holder["err"]
+    proc = holder.get("proc")
+    out = holder.get("out", b"")
+    err = holder.get("stderr", b"")
+    if len(out) > AI_STDOUT_MAX:
+        raise SuggestError(_("suggestion is too large"))
+    if proc.returncode != 0:
+        salvaged = salvage_plan(out.decode("utf-8", "replace"))
+        _think, text = _split_think(err.decode("utf-8", "replace"))
+        if salvaged and "not JSON" in text:
+            return salvaged
+        tail = text[-2000:] if text else _("exit {code}").format(code=proc.returncode)
+        raise SuggestError(_("suggestion command failed: {err}").format(err=tail))
+    try:
+        return _json_plan(out)
+    except (UnicodeError, json.JSONDecodeError) as e:
+        raise SuggestError(_("suggestion is not JSON ({err})").format(err=e))
+
+
+def _field(window, key):
+    match = re.search(r'"' + re.escape(key) + r'"\s*:?\s*"((?:\\.|[^"\\])*)"', window)
+    if not match:
+        return None
+    try:
+        return json.loads('"' + match.group(1) + '"')
+    except json.JSONDecodeError:
+        return match.group(1)
+
+
+def salvage_plan(text):
+    """Pull paths out of a reply whose JSON is missing a colon or a comma."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    items, seen = [], set()
+    marks = list(re.finditer(r'"path"\s*:?\s*"', text))
+    for index, match in enumerate(marks):
+        end = marks[index + 1].start() if index + 1 < len(marks) else len(text)
+        window = text[match.start():end]
+        if '"quarantine_to"' in window[:20]:
+            continue
+        if "}" not in window:
+            continue
+        path = _field(window, "path")
+        action = _field(window, "action")
+        reason = _field(window, "reason") or ""
+        if not path or action not in ("delete", "quarantine") or path in seen:
+            continue
+        seen.add(path)
+        items.append({"path": path, "action": action, "reason": reason})
+    if not items:
+        return None
+    plan = {"items": items}
+    at = text.find('"quarantine_to"')
+    if at >= 0:
+        window = text[at:at + 400]
+        folder = _field(window, "path")
+        if folder and "}" in window:
+            plan["quarantine_to"] = {
+                "path": folder,
+                "create": True,
+                "reason": _field(window, "reason") or "",
+            }
+    return plan
+
+
+def reply_lines(text, waiting=False):
+    """The model reply as lines: action, path, reason. No raw JSON."""
+    plan = salvage_plan(text) or {}
+    lines = []
+    for item in plan.get("items") or []:
+        word = _("Delete") if item["action"] == "delete" else _("Quarantine")
+        lines.append(f" {word:<12} {item['path']}")
+        if item.get("reason"):
+            lines.append(f" {'':12} {item['reason']}")
+    folder = (plan.get("quarantine_to") or {}).get("path")
+    if folder:
+        lines.append(" " + _("Folder") + "  " + folder)
+    if not lines and waiting:
+        return [" " + _("Writing the plan.")]
+    return lines
+
+
+def _json_plan(raw):
+    """The answer may arrive as raw model text. Take the JSON object out of it."""
+    text = raw.decode("utf-8", "replace").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+        salvaged = salvage_plan(text)
+        if salvaged:
+            return salvaged
+        raise json.JSONDecodeError("no plan", text, 0)
+
+
+def _drop(dropped, path, reason):
+    dropped.append({"path": path, "reason": reason})
+
+
+def filter_plan(plan, index, root):
+    """Keep paths that are in the export. Drop the rest, and drop overlaps."""
+    if not isinstance(plan, dict) or not isinstance(plan.get("items"), list):
+        raise SuggestError(_("suggestion must be a JSON object with an \"items\" list"))
+    root_path = normalize(info_of(root)["name"])
+    home = normalize(os.path.expanduser("~"))
+    by_path = {}
+    dropped = []
+    for raw in plan["items"]:
+        if not isinstance(raw, dict):
+            _drop(dropped, "", _("not an object"))
+            continue
+        path = raw.get("path")
+        action = raw.get("action")
+        reason = raw.get("reason", "")
+        if not isinstance(path, str) or not path.strip():
+            _drop(dropped, "", _("missing path"))
+            continue
+        path = normalize(path)
+        if "\n" in path or "\x00" in path:
+            _drop(dropped, path, _("name contains a newline: not supported"))
+            continue
+        if action not in ("delete", "quarantine"):
+            _drop(dropped, path, _("action must be delete or quarantine"))
+            continue
+        if path not in index:
+            _drop(dropped, path, _("not in the export (created since the scan, or outside it)"))
+            continue
+        if path.count("/") <= 1:
+            _drop(dropped, path, _("top-level path (/, /etc, /var...): refused on principle"))
+            continue
+        if path == home:
+            _drop(dropped, path, _("this is your home directory"))
+            continue
+        if path == root_path:
+            _drop(dropped, path, _("this is the root of the scan"))
+            continue
+        blocked = suggestion_block(path)
+        if blocked:
+            _drop(dropped, path, blocked)
+            continue
+        if not isinstance(reason, str):
+            reason = ""
+        reason = " ".join(reason.split())[:200]
+        prev = by_path.get(path)
+        if prev is None:
+            by_path[path] = {"path": path, "action": action, "reason": reason,
+                             "size": index[path]["size"]}
+        elif prev is False or prev["action"] != action:
+            _drop(dropped, path, _("conflicts with another action"))
+            by_path[path] = False
+        else:
+            _drop(dropped, path, _("duplicate"))
+    by_path = {p: v for p, v in by_path.items() if v}
+    # A directory and a descendant with two actions: drop the directory.
+    # Deleting or quarantining it would also take the descendant.
+    while True:
+        victim = None
+        for path, row in by_path.items():
+            prefix = path + "/"
+            for other_path, other in by_path.items():
+                if other_path.startswith(prefix) and other["action"] != row["action"]:
+                    victim = (path, other_path)
+                    break
+            if victim:
+                break
+        if not victim:
+            break
+        path, other_path = victim
+        _drop(dropped, path, _("conflicts with {path}").format(path=other_path))
+        del by_path[path]
+    for path in sorted(by_path, key=len, reverse=True):
+        if path not in by_path:
+            continue
+        parent = os.path.dirname(path)
+        while parent and parent != "/":
+            other = by_path.get(parent)
+            if other and other["action"] == by_path[path]["action"]:
+                _drop(dropped, path, _("covered by {path}").format(path=parent))
+                del by_path[path]
+                break
+            parent = os.path.dirname(parent)
+    accepted = [by_path[p] for p in sorted(by_path)]
+    return accepted, dropped
+
+
+def choose_quarantine_dir(raw, disks, scan_root, need, forbidden):
+    """A folder on a known writable disk, large enough when the move copies.
+
+    The model's folder is kept when it sits on such a disk and does not overlap
+    a path in the plan. Otherwise the writable disk with the most free space,
+    other than the scan's disk, is used. One folder: the original paths are
+    kept inside it."""
+    if isinstance(raw, str):
+        raw = {"path": raw, "create": True, "reason": ""}
+    mounts = [disk for disk in disks if disk.get("mount") and disk.get("writable")]
+    scan_mount = mount_of(scan_root, mounts) if scan_root else None
+
+    def same_disk(disk):
+        return bool(scan_mount and disk["mount"] == scan_mount["mount"])
+
+    def fits(disk):
+        if same_disk(disk):
+            return True
+        return disk.get("free", 0) >= need
+
+    def pack(path, reason, disk):
+        exists = os.path.isdir(path)
+        return {
+            "path": path,
+            "create": not exists,
+            "reason": reason,
+            "same_disk": same_disk(disk),
+            "free": disk.get("free", 0),
+            "mount": disk["mount"],
+            "kind": disk.get("kind") or "disk",
+        }
+
+    def fallback():
+        others = [disk for disk in mounts if fits(disk) and not same_disk(disk)]
+        others.sort(key=lambda disk: disk.get("free", 0), reverse=True)
+        if others:
+            path = os.path.join(others[0]["mount"], "ncdu-clean")
+            return pack(path, _("Largest disk with enough free space."), others[0])
+        home_disk = mount_of(default_trash(), mounts)
+        if home_disk is not None:
+            return pack(default_trash(), _("No other disk has enough free space."), home_disk)
+        return {
+            "path": default_trash(),
+            "create": not os.path.isdir(default_trash()),
+            "reason": _("No other disk has enough free space."),
+            "same_disk": True,
+            "free": 0,
+            "mount": "",
+            "kind": "disk",
+        }
+
+    if not isinstance(raw, dict):
+        return fallback()
+    path = raw.get("path")
+    if not isinstance(path, str) or not path.startswith("/"):
+        return fallback()
+    path = normalize(path)
+    if path.count("/") <= 1 or path == normalize(os.path.expanduser("~")):
+        return fallback()
+    disk = mount_of(path, mounts)
+    if disk is None or not fits(disk):
+        return fallback()
+    for bad in forbidden:
+        bad = normalize(bad)
+        if path == bad or path.startswith(bad + "/") or bad.startswith(path + "/"):
+            return fallback()
+    if os.path.lexists(path) and not os.path.isdir(path):
+        return fallback()
+    parent = path
+    while parent != "/" and not os.path.isdir(parent):
+        parent = os.path.dirname(parent)
+    if mount_of(parent, mounts) is None or mount_of(parent, mounts)["mount"] != disk["mount"]:
+        return fallback()
+    reason = raw.get("reason") if isinstance(raw.get("reason"), str) else ""
+    reason = " ".join(reason.split())[:200] or _("Suggested folder.")
+    return pack(path, reason, disk)
+
+
+def suggest_plan(root):
+    payload, index = build_payload(root)
+    shown, total = len(payload["items"]), payload["total"]
+    plan = run_ai(payload)
+    accepted, dropped = filter_plan(plan, index, root)
+    need = sum(row.get("size", 0) for row in accepted if row["action"] == "quarantine")
+    dest = choose_quarantine_dir(
+        plan.get("quarantine_to") if isinstance(plan, dict) else None,
+        payload["disks"], payload["root"], need, [row["path"] for row in accepted])
+    return accepted, dropped, shown, total, dest
+
+
+def explain_failure(raw, interactive):
+    """Plain reason for a failed suggestion, then what to do next."""
+    text = str(raw).strip()
+    low = text.lower()
+    if "tokenize" in low:
+        why = _("The model could not read the request: the text is too long for its context window.")
+    elif any(s in low for s in ("unreachable", "connection reset", "timed out", "connection refused")):
+        why = _("The model server did not answer. Check the address and the port.")
+    elif any(s in low for s in ("returned 500", "returned 502", "returned 503")):
+        why = _("The model server failed while reading the request.")
+    elif "is not set" in low:
+        why = _("No suggestion command is set. Set NCDU_CLEAN_AI to the command that calls the model.")
+    elif any(s in low for s in ("not json", "no message", "must be a json")):
+        why = _("The model answered, but not with a usable plan.")
+    elif any(s in low for s in ("cannot run", "not a valid command", "exit ")):
+        why = _("The suggestion command stopped before returning a plan.")
+    elif "too large" in low:
+        why = _("The model reply is too large to use.")
+    else:
+        why = text
+    if interactive:
+        follow = _("Nothing was deleted. Space marks a path, x asks before doing anything.")
+    else:
+        follow = _("Nothing was deleted. Mark paths yourself with ncdu-clean browse.")
+    lines = [why, follow]
+    if text and text != why:
+        lines.append(_("Detail: {err}").format(err=text[-300:]))
+    return "\n".join(lines)
+
+
+def choose_mark(deletes, quarantines):
+    """Ask which action to mark when the plan has both. Return (rows, label)."""
+    if deletes and quarantines:
+        print()
+        print(_("The suggestion has both actions. Mark one of them."))
+        print(_("  [d] mark the paths to delete ({n})").format(n=len(deletes)))
+        print(_("  [q] mark the paths to quarantine ({n})").format(n=len(quarantines)))
+        print(_("  [Enter] mark nothing"))
+        choice = input("> ").strip().lower()
+        if choice == "d":
+            return deletes, _("delete")
+        if choice == "q":
+            return quarantines, _("quarantine")
+        return None, ""
+    if deletes:
+        return deletes, _("delete")
+    if quarantines:
+        return quarantines, _("quarantine")
+    return None, ""
+
+
+def _print_group(title, rows):
+    if not rows:
+        return 0
+    rows = sorted(rows, key=lambda row: row.get("size", 0), reverse=True)
+    total = sum(row.get("size", 0) for row in rows)
+    width = max(len(human(row.get("size", 0))) for row in rows)
+    print(_("{title}  {size}").format(title=title, size=human(total)))
+    for row in rows:
+        size = human(row.get("size", 0)).rjust(width)
+        reason = row.get("reason") or ""
+        print(f"  {size}  {row['path']}" + (f"  {reason}" if reason else ""))
+    return total
+
+
+def show_plan(accepted, dropped):
+    """Print the plan with the space of each path. Return (delete rows, quarantine rows)."""
+    deletes = [x for x in accepted if x["action"] == "delete"]
+    quarantines = [x for x in accepted if x["action"] == "quarantine"]
+    delete_size = _print_group(_("Delete"), deletes)
+    quarantine_size = _print_group(_("Quarantine"), quarantines)
+    if deletes:
+        print(_("Delete frees {size}.").format(size=human(delete_size)))
+    if quarantines:
+        print(_("Quarantine sets aside {size}.").format(size=human(quarantine_size)))
+    if dropped:
+        print(_("Dropped"))
+        for row in dropped:
+            print(f"  {row['path'] or '-'}  {row.get('reason', '')}")
+    return deletes, quarantines
+
+
+def mark_rows(marked, root, rows):
+    marked.clear()
+    for row in rows:
+        marked[row["path"]] = find(root, row["path"])
+
+
+def on_terminal():
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def cmd_suggest(a):
+    if on_terminal():
+        return suggest_ui(a)
+    root = load_cli(a.export)
+    try:
+        accepted, dropped, shown, total, dest = suggest_plan(root)
+    except SuggestError as e:
+        print("ncdu-clean: " + explain_failure(e, False), file=sys.stderr)
+        return 2
+    deletes = [x for x in accepted if x["action"] == "delete"]
+    quarantines = [x for x in accepted if x["action"] == "quarantine"]
+    try:
+        if a.delete_list:
+            write_list(a.delete_list, {x["path"]: None for x in deletes})
+        if a.quarantine_list:
+            write_list(a.quarantine_list, {x["path"]: None for x in quarantines})
+    except OSError as e:
+        die(_("Cannot write: {err}").format(err=e.strerror))
+    json.dump(
+        {"delete": deletes, "quarantine": quarantines, "dropped": dropped,
+         "quarantine_to": {"path": dest["path"], "create": dest["create"], "reason": dest["reason"]}},
+        sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    print(_("suggestion: {delete} to delete, {quarantine} to quarantine, {dropped} dropped")
+          .format(delete=len(deletes), quarantine=len(quarantines), dropped=len(dropped)),
+          file=sys.stderr)
+    print(_("Quarantine folder: {path}").format(path=dest["path"]), file=sys.stderr)
+    return 0
+
+
 # --- interactive browser (curses) ----------------------------------------------
 
 HAS_COLOR = False
@@ -775,22 +1592,29 @@ def setup_curses():
 class LoadScreen:
     """ncdu-style progress box, drawn while the export is loaded."""
 
-    def __init__(self, scr, name):
-        self.scr, self.name, self.last = scr, name, 0.0
+    def __init__(self, scr, name, note=None):
+        self.scr, self.name, self.note = scr, name, note
+        self.last = 0.0
+        self.started = time.monotonic()
+        self.key_note = ""
         scr.nodelay(True)
 
     def __call__(self, phase, frac, items, size, current):
-        if self.scr.getch() in (ord("q"), ord("Q")):
+        key = self.scr.getch()
+        if key in (ord("q"), ord("Q")):
             raise Aborted()
+        if key not in (-1,):
+            self.key_note = _("Key received. Still reading the export.")
         now = time.monotonic()
-        if now - self.last < 0.08 and frac < 1:
+        if now - self.last < 0.08 and frac < 1 and not self.key_note:
             return
         self.last = now
         label = _("Reading file…") if phase == "read" else _("Analysing…")
-        lines = []
+        lines = [_("Elapsed {time}").format(time=fmt_clock(now - self.started))]
         if items:
             lines.append(_("Total items: {n}   size: {size}").format(n=items, size=human(size)))
-            lines.append(_("Current item: {path}").format(path=current))
+        if current:
+            lines.append(current)
         self.draw(label, frac, lines)
 
     def draw(self, label, frac, lines, hint=True):
@@ -802,7 +1626,7 @@ class LoadScreen:
                     max(w - 1, 1), curses.A_REVERSE)
         scr.noutrefresh()
         if h >= 12 and w >= 44:
-            bw, bh = min(w - 4, 96), 9
+            bw, bh = min(w - 4, 96), 11
             win = curses.newwin(bh, bw, max(2, (h - bh) // 2), (w - bw) // 2)
             win.box()
             win.addnstr(0, 2, " " + _("Loading…") + " ", bw - 4, curses.A_BOLD)
@@ -812,7 +1636,7 @@ class LoadScreen:
                 filled = int(barw * min(frac, 1.0))
                 win.addnstr(3, 2, "[" + "#" * filled + " " * (barw - filled) + f"] {frac * 100:3.0f}%",
                             bw - 4)
-            for i, line in enumerate(lines[:2]):
+            for i, line in enumerate(lines[:3]):
                 win.addnstr(5 + i, 2, line, bw - 4)
             if hint:
                 text = _("Press q to abort")
@@ -821,7 +1645,13 @@ class LoadScreen:
         else:
             scr.addnstr(2, 0, label + (f" {frac * 100:.0f}%" if frac is not None else ""),
                         max(w - 1, 1))
-            scr.noutrefresh()
+        if self.note or self.key_note:
+            scr.addnstr(h - 2, 0, (" " + (self.note or "")).ljust(max(w - 1, 1)),
+                        max(w - 1, 1), curses.A_BOLD)
+            scr.addnstr(h - 1, 0, (" " + self.key_note).ljust(max(w - 1, 1)), max(w - 1, 1))
+        scr.noutrefresh()
+        if h >= 12 and w >= 44:
+            win.noutrefresh()
         curses.doupdate()
 
 
@@ -838,6 +1668,7 @@ class Browser:
             _("  Space            mark / unmark (a file, or a whole directory)"),
             _("  [*] marked directly   [+] covered by a marked directory above"),
             _("  c                clear the selection"),
+            _("  p                suggestion: d delete, q quarantine, Enter does nothing"),
             _("  x                act on the selection: simulate it, then delete,"),
             _("                   quarantine it or save the list to a file"),
             "",
@@ -1015,6 +1846,469 @@ class Browser:
         scr.clear()
         scr.refresh()
 
+    def apply_suggestion(self, scr):
+        """Ask NCDU_CLEAN_AI for a plan and show it on this screen. Does not remove anything."""
+        self.present_suggestion(scr, None, None)
+
+    def present_suggestion(self, scr, delete_list, quarantine_list):
+        import curses
+        state = {"phase": "prepare", "cancel": False, "sent": 0, "total": 0, "disks": [],
+                 "scan": normalize(info_of(self.root)["name"])}
+        holder = {}
+
+        def work():
+            try:
+                state["phase"] = "prepare"
+                disks = list_storage()
+                state["disks"] = disks
+                payload, index = build_payload(
+                    self.root, cancel=lambda: state["cancel"], disks=disks)
+                state["phase"] = "ask"
+                state["sent"] = len(payload["items"])
+                state["total"] = payload["total"]
+                plan = run_ai(payload, cancel=lambda: state["cancel"],
+                              on_text=lambda text: state.__setitem__("reply", text),
+                              on_think=lambda text: state.__setitem__("think", text))
+                state["phase"] = "read"
+                accepted, dropped = filter_plan(plan, index, self.root)
+                need = sum(row.get("size", 0) for row in accepted if row["action"] == "quarantine")
+                dest = choose_quarantine_dir(
+                    plan.get("quarantine_to") if isinstance(plan, dict) else None,
+                    payload["disks"], payload["root"], need, [row["path"] for row in accepted])
+                holder["ok"] = (accepted, dropped, state["sent"], state["total"], dest)
+            except Exception as exc:
+                holder["err"] = exc
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        started = time.monotonic()
+        spin = 0
+        note = ""
+        scr.timeout(50)
+        try:
+            while worker.is_alive():
+                self._activity(scr, state, time.monotonic() - started, spin, note)
+                spin += 1
+                key = scr.getch()
+                if key in (10, 13, curses.KEY_ENTER):
+                    note = _("Enter received. Still working. The file list is not open.")
+                elif key in (ord("q"), 27):
+                    state["cancel"] = True
+                    note = _("Cancel received. Stopping. The file list is not open yet.")
+                elif key not in (-1,):
+                    note = _("Key received. Still working. The file list is not open.")
+        finally:
+            scr.timeout(-1)
+        worker.join()
+        scr.timeout(0)
+        while scr.getch() != -1:
+            pass
+        scr.timeout(-1)
+        if "err" in holder:
+            err = holder["err"]
+            if isinstance(err, SuggestCancelled):
+                self.msg = _("Cancelled. Nothing was deleted. This is the file list.")
+                return
+            if isinstance(err, SuggestError):
+                self.notice_screen(scr, explain_failure(err, True).splitlines(),
+                                   state.get("reply") or "")
+                return
+            self.notice_screen(scr, [str(err)])
+            return
+        accepted, dropped, shown, total, dest = holder["ok"]
+        try:
+            deletes = [row for row in accepted if row["action"] == "delete"]
+            quarantines = [row for row in accepted if row["action"] == "quarantine"]
+            if delete_list:
+                write_list(delete_list, {row["path"]: None for row in deletes})
+            if quarantine_list:
+                write_list(quarantine_list, {row["path"]: None for row in quarantines})
+        except OSError as e:
+            self.notice_screen(scr, [_("Cannot write: {err}").format(err=e.strerror)])
+            return
+        self.plan_screen(scr, accepted, dropped, shown, total, dest, state["disks"])
+
+    def plan_groups(self, accepted, dropped):
+        def pack(action):
+            rows = sorted((row for row in accepted if row["action"] == action),
+                          key=lambda row: row.get("size", 0), reverse=True)
+            return rows, sum(row.get("size", 0) for row in rows)
+
+        deletes, delete_size = pack("delete")
+        quarantines, quarantine_size = pack("quarantine")
+        return deletes, delete_size, quarantines, quarantine_size, list(dropped)
+
+    def _fit(self, text, width):
+        text = text.replace("\n", " ")
+        if width <= 0:
+            return ""
+        if len(text) <= width:
+            return text
+        if width == 1:
+            return "…"
+        return text[:width - 1] + "…"
+
+    def _activity(self, scr, state, elapsed, spin, note):
+        """Full-screen status. A centered box was refreshed away and left a blank wait."""
+        import curses
+        try:
+            h, w = scr.getmaxyx()
+            scr.erase()
+            if h < 6 or w < 40:
+                scr.addnstr(0, 0, _("Terminal too small"), max(w - 1, 1))
+                scr.refresh()
+                return
+            phase = state.get("phase")
+            mark = "|/-\\"[spin % 4]
+            if phase == "ask":
+                title = _("Asking the model")
+                detail = _("Sent {sent} entries out of {total}. Waiting for the answer.") \
+                    .format(sent=state.get("sent", 0), total=state.get("total", 0))
+            elif phase == "read":
+                title = _("Reading the answer")
+                detail = _("The model has answered. Nothing is deleted yet.")
+            else:
+                title = _("Preparing the summary")
+                detail = _("The export is loaded. The model has not been asked yet.")
+            header = _(" ncdu-clean · suggestion") + " · " + self.scan_name \
+                + " · " + fmt_clock(elapsed)
+            scr.addnstr(0, 0, header.ljust(w - 1), w - 1, curses.A_REVERSE)
+            scr.addnstr(2, 0, f" {mark}  {title}".ljust(w - 1), w - 1, curses.A_BOLD)
+            scr.addnstr(3, 0, (" " + detail).ljust(w - 1), w - 1)
+            reply = state.get("reply") or ""
+            think = state.get("think") or ""
+            if reply or think:
+                if reply:
+                    label = _("Suggestion")
+                    view = reply_lines(reply, waiting=(phase == "ask"))
+                else:
+                    label = _("Thinking")
+                    view = self._tail(think, w - 2, max(h - 8, 1))
+                if phase == "ask" and view:
+                    view[-1] += "█"
+                scr.addnstr(5, 0, (" " + label).ljust(w - 1), w - 1, curses.A_BOLD)
+                room = max(h - 8, 1)
+                for i, line in enumerate(view[-room:]):
+                    scr.addnstr(6 + i, 0, self._fit(line, w - 1).ljust(w - 1), w - 1)
+            else:
+                scr.addnstr(4, 0, (" " + _("Nothing is deleted.")).ljust(w - 1), w - 1)
+                if phase == "ask":
+                    scr.addnstr(5, 0, (" " + _("Waiting for the first word.")).ljust(w - 1),
+                                w - 1, curses.A_BOLD)
+                scr.addnstr(7, 0, (" " + _("Disks")).ljust(w - 1), w - 1, curses.A_BOLD)
+                lines, more = disk_rows(state.get("disks") or [], max(h - 14, 1),
+                                         scan_root=state.get("scan"))
+                row = 8
+                if not lines:
+                    lines = [" " + _("No disk found.")]
+                for line in lines:
+                    if row >= h - 3:
+                        break
+                    scr.addnstr(row, 0, self._fit(line, w - 1).ljust(w - 1), w - 1)
+                    row += 1
+                if more and row < h - 3:
+                    scr.addnstr(row, 0, (" " + _("{n} more").format(n=more)).ljust(w - 1), w - 1)
+            if note:
+                scr.addnstr(h - 2, 0, (" " + note).ljust(w - 1), w - 1, curses.A_REVERSE)
+            scr.addnstr(h - 1, 0, _(" q cancels · a key is shown above").ljust(w - 1), w - 1)
+            scr.refresh()
+        except curses.error:
+            pass
+
+    def _panel(self, scr, title, lines, footer=None):
+        """Centered box, same family as the loading screen."""
+        import curses
+        scr.erase()
+        h, w = scr.getmaxyx()
+        scr.addnstr(0, 0, (_(" ncdu-clean · suggestion") + " · " + self.scan_name).ljust(w - 1),
+                    w - 1, curses.A_REVERSE)
+        if h < 8 or w < 40:
+            scr.addnstr(2, 0, title, max(w - 1, 1))
+            scr.refresh()
+            return
+        width = min(w - 4, 76)
+        wrapped = []
+        for line in lines:
+            wrapped.extend(self._wrap(line, width - 4) or [""])
+        height = min(h - 4, max(7, len(wrapped) + 4))
+        top = max(2, (h - height) // 2)
+        left = (w - width) // 2
+        win = curses.newwin(height, width, top, left)
+        win.box()
+        win.addnstr(0, 2, " " + title + " ", width - 4, curses.A_BOLD)
+        for i, line in enumerate(wrapped[:height - 4]):
+            win.addnstr(2 + i, 2, line, width - 4)
+        bottom = footer if footer is not None else _(" Enter back to the browser")
+        scr.addnstr(h - 1, 0, bottom.ljust(w - 1), w - 1)
+        scr.noutrefresh()
+        win.noutrefresh()
+        curses.doupdate()
+
+    def _wrap(self, text, width):
+        width = max(width, 8)
+        out, cur = [], ""
+        for word in text.split():
+            if not cur:
+                cur = word
+            elif len(cur) + 1 + len(word) <= width:
+                cur += " " + word
+            else:
+                out.append(cur)
+                cur = word
+        if cur:
+            out.append(cur)
+        return out
+
+    def wait_screen(self, scr, label):
+        self._panel(scr, _("Suggestion"), [label])
+
+    def _tail(self, text, width, rows):
+        """Last rows of text, broken on the screen width."""
+        width = max(width, 8)
+        flat = []
+        for raw in text.replace("\r", "").split("\n"):
+            raw = raw or " "
+            while raw:
+                flat.append(raw[:width])
+                raw = raw[width:]
+        return flat[-rows:]
+
+    def notice_screen(self, scr, lines, reply=""):
+        """Say why a suggestion failed, then return to the file list."""
+        import curses
+        if not reply:
+            self._panel(scr, _("Suggestion"), lines)
+            while True:
+                k = scr.getch()
+                if k in (10, 13, curses.KEY_ENTER, 27, ord("q"), ord("x"), ord(" ")):
+                    self.msg = lines[0] if lines else ""
+                    return
+            return
+        while True:
+            try:
+                h, w = scr.getmaxyx()
+                scr.erase()
+                scr.addnstr(0, 0, (_(" ncdu-clean · suggestion") + " · " + self.scan_name).ljust(w - 1),
+                            w - 1, curses.A_REVERSE)
+                scr.addnstr(2, 0, (" " + _("Suggestion")).ljust(w - 1), w - 1, curses.A_BOLD)
+                err_at = max(4, h - 1 - max(len(lines), 1))
+                readable = "\n".join(reply_lines(reply))
+                for i, line in enumerate(self._tail(readable, max(w - 2, 1), max(err_at - 3, 1))):
+                    scr.addnstr(3 + i, 0, (" " + line).ljust(w - 1), w - 1)
+                for i, line in enumerate(lines):
+                    y = err_at + i
+                    if 1 <= y < h - 1:
+                        scr.addnstr(y, 0, (" " + self._fit(line, w - 1)).ljust(w - 1), w - 1, curses.A_BOLD)
+                scr.addnstr(h - 1, 0, _(" Enter back to the file list").ljust(w - 1), w - 1)
+                scr.refresh()
+            except curses.error:
+                pass
+            k = scr.getch()
+            if k in (10, 13, curses.KEY_ENTER, 27, ord("q"), ord("x"), ord(" ")):
+                self.msg = lines[0] if lines else ""
+                return
+
+    def run_suggested(self, scr, rows, trash):
+        """Leave the screen, show the simulation, and act only after yes. Return True if they confirmed."""
+        import curses
+        paths = [row["path"] for row in rows]
+        curses.def_prog_mode()
+        curses.endwin()
+        acted = False
+        try:
+            print()
+            actions = {row.get("action") for row in rows}
+            if trash and actions == {"delete"}:
+                print(_("These paths were suggested for deletion. They will be moved instead."))
+            elif not trash and actions == {"quarantine"}:
+                print(_("These paths were suggested for quarantine. They will be deleted instead."))
+            run_removal(paths, self.root, True, trash, False, self.log_path, hint=False)
+            if trash:
+                print(_("Quarantine folder: {path}").format(path=trash))
+                if not os.path.isdir(trash):
+                    print(_("This folder will be created. The original paths are kept inside it."))
+                else:
+                    print(_("The original paths are kept inside this folder."))
+            answer = input((_("Quarantine {paths}? Type \"{yes}\": ") if trash
+                            else _("Delete {paths} permanently? Type \"{yes}\": "))
+                           .format(paths=fmt_paths(len(paths)), yes=_("yes"))).strip().lower()
+            if answer in (_("yes").lower(), "yes"):
+                _rc, gone = run_removal(paths, self.root, True, trash, True, self.log_path)
+                if gone:
+                    self.after_removal(gone)
+                acted = True
+            else:
+                print(_("Cancelled."))
+            input("\n" + _("Press Enter to go back to the browser..."))
+        except (EOFError, KeyboardInterrupt):
+            print()
+        scr.clear()
+        scr.refresh()
+        return acted
+
+    def plan_screen(self, scr, accepted, dropped, shown, total, dest, disks):
+        """The plan, the disks, and three choices. Nothing is removed on this screen."""
+        import curses
+        live = [row for row in accepted if row.get("action") in ("delete", "quarantine")]
+        dropped_live = list(dropped)
+        cursor = 0
+        self._plan_top = 0
+        while True:
+            deletes, delete_size, quarantines, quarantine_size, dropped_rows = self.plan_groups(
+                live, dropped_live)
+            groups = []
+            if deletes:
+                groups.append(("delete", "[D]", _("Delete"), deletes, delete_size))
+            if quarantines:
+                groups.append(("quarantine", "[Q]", _("Quarantine"), quarantines, quarantine_size))
+            if dropped_rows:
+                groups.append(("drop", "[-]", _("Dropped"), dropped_rows, None))
+            items = [row for _kind, _tag, _title, rows, _size in groups for row in rows]
+            h, w = scr.getmaxyx()
+            scr.erase()
+            if h < 8 or w < 40:
+                scr.addnstr(0, 0, _("Terminal too small"), max(w - 1, 1))
+                scr.refresh()
+                scr.getch()
+                return
+            scr.addnstr(0, 0, (_(" ncdu-clean · suggestion") + " · " + self.scan_name).ljust(w - 1),
+                        w - 1, curses.A_REVERSE)
+            if shown < total:
+                sub = _(" {shown} of {total}, largest first").format(shown=shown, total=total)
+            else:
+                sub = _(" {n} entries").format(n=shown)
+            scr.addnstr(1, 0, sub.ljust(w - 1), w - 1, curses.A_BOLD)
+            pinned = [" " + _("Disks")]
+            disk_lines, more = disk_rows(
+                disks, 4, scan_root=normalize(info_of(self.root)["name"]))
+            pinned.extend(disk_lines or [" " + _("No disk found.")])
+            if more:
+                pinned.append(" " + _("{n} more").format(n=more))
+            pinned.append(_(" Quarantine folder: {path}").format(path=dest["path"]))
+            detail = []
+            if dest.get("create"):
+                detail.append(_("This folder will be created."))
+            if dest.get("same_disk"):
+                detail.append(_("Same disk: this does not free space."))
+            elif dest.get("mount"):
+                detail.append(_("{free} free on {mount}.").format(
+                    free=human(dest.get("free", 0)), mount=dest["mount"]))
+            if dest.get("kind") == "removable":
+                detail.append(_("Removable disk."))
+            if dest.get("reason"):
+                detail.append(dest["reason"])
+            if detail:
+                pinned.append(" " + "  ".join(detail))
+            pinned = pinned[:max(4, h - 10)]
+            for i, line in enumerate(pinned):
+                scr.addnstr(2 + i, 0, self._fit(line, w - 1).ljust(w - 1), w - 1,
+                            curses.A_BOLD if i == 0 else curses.A_NORMAL)
+            body_top = 2 + len(pinned)
+            body_h = max(h - body_top - 2, 1)
+            rendered = []
+            biggest = max((row.get("size", 0) for row in items), default=1) or 1
+            cursor = max(0, min(cursor, len(items) - 1)) if items else 0
+            seen = 0
+            for kind, tag, title, rows, size in groups:
+                if rendered:
+                    rendered.append((None, "", curses.A_NORMAL))
+                label = " " + title
+                if size is not None:
+                    label += "  " + human(size)
+                attr = curses.A_BOLD
+                pair = {"delete": 1, "quarantine": 2, "drop": 3}[kind]
+                if HAS_COLOR:
+                    attr |= curses.color_pair(pair)
+                rendered.append((None, label, attr))
+                for row in rows:
+                    selected = seen == cursor
+                    bar_n = int(round(10 * row.get("size", 0) / biggest)) if size is not None else 0
+                    bar = "#" * bar_n
+                    size_text = human(row.get("size", 0)) if size is not None else " " * 9
+                    prefix = f" {tag} {size_text:>9} [{bar:<10}] "
+                    path = self._fit(row.get("path") or "—", max(w - len(prefix) - 1, 1))
+                    line_attr = curses.A_REVERSE if selected else curses.A_NORMAL
+                    if HAS_COLOR and not selected:
+                        line_attr |= curses.color_pair(pair)
+                    rendered.append((seen, prefix + path, line_attr))
+                    reason = (row.get("reason") or "").strip()
+                    if reason:
+                        reason_attr = curses.A_REVERSE if selected else curses.A_DIM
+                        rendered.append((seen, " " * len(prefix) + self._fit(reason, max(w - len(prefix) - 1, 1)),
+                                         reason_attr))
+                    seen += 1
+            start = 0
+            for index, (owner, _text, _attr) in enumerate(rendered):
+                if owner == cursor:
+                    start = index
+                    break
+            span = 1
+            if start + 1 < len(rendered) and rendered[start + 1][0] == cursor:
+                span = 2
+            if start < self._plan_top:
+                self._plan_top = start
+            if start + span - 1 >= self._plan_top + body_h:
+                self._plan_top = start + span - body_h
+            self._plan_top = max(0, min(self._plan_top, max(len(rendered) - body_h, 0)))
+            for i, (_owner, text, attr) in enumerate(rendered[self._plan_top:self._plan_top + body_h]):
+                scr.addnstr(body_top + i, 0, text.ljust(w - 1), w - 1, attr)
+            status = [_("Plan ready.")]
+            if deletes:
+                status.append(_("Delete frees {size}.").format(size=human(delete_size)))
+            if quarantines:
+                status.append(_("Quarantine sets aside {size}.").format(size=human(quarantine_size)))
+            scr.addnstr(h - 2, 0, (" " + "  ·  ".join(status)).ljust(w - 1), w - 1, curses.A_BOLD)
+            if deletes and quarantines:
+                keys = _(" d delete these · q quarantine the others · Enter do nothing")
+            elif deletes or quarantines:
+                keys = _(" d delete these · q quarantine these · Enter do nothing")
+            else:
+                keys = _(" Enter back to the file list")
+            scr.addnstr(h - 1, 0, keys.ljust(w - 1), w - 1)
+            scr.refresh()
+            k = scr.getch()
+            if k in (curses.KEY_DOWN, ord("j")) and items:
+                cursor = min(cursor + 1, len(items) - 1)
+            elif k in (curses.KEY_UP, ord("k")) and items:
+                cursor = max(cursor - 1, 0)
+            elif k == curses.KEY_NPAGE and items:
+                cursor = min(cursor + max(body_h // 2, 1), len(items) - 1)
+            elif k == curses.KEY_PPAGE and items:
+                cursor = max(cursor - max(body_h // 2, 1), 0)
+            elif k in (curses.KEY_HOME, ord("g")):
+                cursor = 0
+            elif k in (curses.KEY_END, ord("G")) and items:
+                cursor = len(items) - 1
+            elif k in (ord("d"), ord("q")) and (deletes or quarantines):
+                if deletes and quarantines:
+                    rows = deletes if k == ord("d") else quarantines
+                else:
+                    rows = deletes or quarantines
+                trash = None if k == ord("d") else dest["path"]
+                self._ack(scr, _("d received. Nothing is deleted until you type yes.") if not trash
+                          else _("q received. Nothing is moved until you type yes."))
+                if self.run_suggested(scr, rows, trash):
+                    gone = {row["path"] for row in rows}
+                    live = [row for row in live if row["path"] not in gone]
+                    if not live:
+                        self.msg = _("Done. Nothing else from this suggestion.")
+                        return
+            elif k in (10, 13, curses.KEY_ENTER, 27, ord("x")):
+                self._ack(scr, _("Enter received. Nothing was deleted."))
+                self.msg = _("Nothing was deleted.")
+                return
+
+    def _ack(self, scr, text):
+        h, w = scr.getmaxyx()
+        scr.addnstr(h - 2, 0, (" " + text).ljust(max(w - 1, 1)), max(w - 1, 1), curses.A_REVERSE)
+        scr.refresh()
+
+    def _take_suggestion(self, rows, label):
+        mark_rows(self.marked, self.root, rows)
+        self.save()
+        self.msg = _("suggestion marked ({n} {action}). Review them, then x.") \
+            .format(n=len(rows), action=label)
+
     def draw(self, scr):
         import curses
         scr.erase()
@@ -1060,8 +2354,8 @@ class Browser:
         if self.msg:
             status += f"   · {self.msg}"
         scr.addnstr(h - 2, 0, status.ljust(w - 1), w - 1, curses.A_BOLD)
-        scr.addnstr(h - 1, 0, _(" arrows/Enter navigate · Space mark · x act · c clear · "
-                                "s/n sort · a size mode · ? help · q quit"), w - 1)
+        scr.addnstr(h - 1, 0, _(" arrows/Enter navigate · Space mark · p suggest · x act · "
+                                "c clear · s/n sort · a size · ? help · q quit"), w - 1)
         scr.refresh()
 
     def show_help(self, scr):
@@ -1113,6 +2407,11 @@ class Browser:
                     _name, path, node, _isdir, _size = rows[self.cursor]
                     self.toggle(path, node)
                     self.cursor += 1
+            elif k == ord("p"):
+                if not os.environ.get("NCDU_CLEAN_AI", "").strip():
+                    self.msg = _("NCDU_CLEAN_AI is not set")
+                else:
+                    self.apply_suggestion(scr)
             elif k == ord("x"):
                 self.actions(scr)
             elif k == ord("c"):
@@ -1142,6 +2441,83 @@ def write_list(path, marked):
         for p in sorted(marked):
             fh.write(p + "\n")
     os.replace(tmp, path)
+
+
+def suggest_ui(a):
+    """Interactive suggestion: the export load, the model wait and the plan are separate screens."""
+    import curses
+    import locale
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass
+    os.environ.setdefault("ESCDELAY", "25")
+
+    def main(scr):
+        setup_curses()
+        screen = LoadScreen(
+            scr, os.path.basename(a.export),
+            note=_("Reading the export. The model is not called yet."))
+        try:
+            root = load_export(a.export, screen)
+        except Aborted:
+            return None
+        browser = Browser(root, os.path.basename(a.export), None, default_log())
+        browser.present_suggestion(scr, a.delete_list, a.quarantine_list)
+        browser.run(scr)
+        return browser
+
+    try:
+        browser = curses.wrapper(main)
+    except ExportError as e:
+        die(str(e))
+    if browser is None:
+        print(_("Aborted."))
+    elif browser.marked:
+        print(_("{paths} marked but not processed: nothing was done. "
+                "(In the browser, x lets you act; -o FILE keeps the selection.)")
+              .format(paths=fmt_paths(len(browser.marked))))
+    return 0
+
+
+def run_browser(root, export_name, out, log_path, marked_rows=None, message="",
+                suggestion=None, failure=None, job=None):
+    """Open the browser on an export already loaded. Nothing is removed here."""
+    import curses
+    import locale
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass
+    os.environ.setdefault("ESCDELAY", "25")
+
+    def main(scr):
+        setup_curses()
+        b = Browser(root, export_name, out, log_path or default_log())
+        if marked_rows:
+            mark_rows(b.marked, root, marked_rows)
+            b.save()
+        if job:
+            job(b, scr)
+        elif failure:
+            b.notice_screen(scr, failure.splitlines())
+        elif suggestion:
+            accepted, dropped, shown, total = suggestion
+            b.plan_screen(scr, accepted, dropped, shown, total)
+        elif message:
+            b.msg = message.split("\n", 1)[0]
+        b.run(scr)
+        return b
+
+    try:
+        b = curses.wrapper(main)
+    except KeyboardInterrupt:
+        return 2
+    if b and b.marked and not out:
+        print(_("{paths} marked but not processed: nothing was done. "
+                "(In the browser, x lets you act; -o FILE keeps the selection.)")
+              .format(paths=fmt_paths(len(b.marked))))
+    return 0
 
 
 def cmd_browse(a):
@@ -1195,6 +2571,7 @@ def build_parser():
         "\n"
         "Commands:\n"
         "  browse EXPORT   browse like ncdu, mark items, then choose what to do with them\n"
+        "  suggest EXPORT  ask $NCDU_CLEAN_AI for a delete / quarantine plan\n"
         "  rm PATH...      delete (or quarantine) after checks, and journal it (for scripts)\n"
         "  log             show the journal of deletions\n"
         "  restore [RUN]   list quarantine runs, or put them back where they came from\n"
@@ -1218,6 +2595,14 @@ def build_parser():
                     help=_("keep the selection in FILE as you go (optional; reloaded if it exists)"))
     br.add_argument("--log", metavar=_("FILE"), help=_("journal of deletions"))
     br.set_defaults(func=cmd_browse)
+
+    sg = sub.add_parser("suggest", help=_("ask for a delete / quarantine plan"))
+    sg.add_argument("export")
+    sg.add_argument("--delete-list", metavar=_("FILE"),
+                    help=_("write the paths to delete, one per line"))
+    sg.add_argument("--quarantine-list", metavar=_("FILE"),
+                    help=_("write the paths to quarantine, one per line"))
+    sg.set_defaults(func=cmd_suggest)
 
     ls = sub.add_parser("list", help=_("flat list of the files of an export"))
     ls.add_argument("export")
