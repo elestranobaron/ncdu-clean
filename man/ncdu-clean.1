@@ -93,15 +93,25 @@ The model may name one quarantine folder on a writable mount
 (\fBquarantine_to\fR).
 A folder that is not on a known writable disk, or that overlaps a path in the
 plan, is replaced by the writable disk with the most free space.
+A removable disk is used first. A folder on the scan disk is not kept while
+a removable disk is mounted.
 On a terminal, reading the export and waiting for the model are separate
 screens: each shows the phase, a running clock, the disks, and the key you just
 pressed.
 q cancels the wait.
-The model's text is drawn on that screen as it is written.
+With \fBNCDU_CLEAN_AI_THINK=1\fR the model thinks first.
+The screen shows that duration, then the plan as the JSON arrives.
+The thinking text is kept in the suggestion log.
 The plan then shows the paths and the quarantine folder.
-d deletes the suggested paths, q moves them into that folder (the folder is
-created when it does not exist), and Enter does nothing.
-Both actions ask for confirmation.
+The bottom line shows the arrows, F1 and q.
+F1 lists the keys.
+t moves the selected line from Delete to Quarantine, or the other way.
+\- takes the selected line out of the plan.
+d deletes the lines under Delete, m moves the lines under Quarantine into
+the folder (the folder is created when it does not exist).
+q or Esc quits and returns the terminal at once.
+Enter returns to the file list.
+d and m ask for confirmation.
 If the model fails, that screen says why. Nothing
 is removed,
 and the journal is not written, until that confirmation.

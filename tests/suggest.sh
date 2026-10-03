@@ -89,6 +89,27 @@ overlap = mod.choose_quarantine_dir(
     {"path": "/mnt/win/Users/trash", "create": True, "reason": "bad"},
     disks, "/mnt/win", 100, ["/mnt/win/Users"])
 assert overlap["path"] == "/tmp/ncdu-clean", overlap
+external = [
+    {"mount": "/mnt/win", "device": "/dev/sdb1", "fs": "ntfs", "size": 200 * 1024**3,
+     "free": 4 * 1024**3, "kind": "disk", "writable": True},
+    {"mount": "/media/usb", "device": "/dev/sdc1", "fs": "vfat", "size": 30 * 1024**3,
+     "free": 30 * 1024**3, "kind": "removable", "writable": True},
+]
+usb = mod.choose_quarantine_dir(
+    {"path": "/mnt/win/quarantine", "create": True, "reason": "same disk"},
+    external, "/mnt/win", 54 * 1024**3, [])
+assert usb["path"] == "/media/usb/ncdu-clean", usb
+assert usb["kind"] == "removable" and usb["same_disk"] is False
+on_key = [
+    {"mount": "/mnt/win", "device": "/dev/sdb1", "fs": "ntfs", "size": 200 * 1024**3,
+     "free": 4 * 1024**3, "kind": "disk", "writable": True},
+    {"mount": "/tmp", "device": "/dev/sdc1", "fs": "ext4", "size": 30 * 1024**3,
+     "free": 30 * 1024**3, "kind": "removable", "writable": True},
+]
+kept_usb = mod.choose_quarantine_dir(
+    {"path": "/tmp/ncdu-clean-suggest-test", "create": True, "reason": "on the key"},
+    on_key, "/mnt/win", 100, [])
+assert kept_usb["path"] == "/tmp/ncdu-clean-suggest-test", kept_usb
 unknown = mod.choose_quarantine_dir(
     {"path": "/no/such", "create": True}, disks, "/mnt/win", 100, [])
 assert unknown["path"] == "/tmp/ncdu-clean", unknown
@@ -106,7 +127,7 @@ assert dest["reason"]
 PY
 
 python3 - <<'PY'
-import importlib.machinery, os
+import importlib.machinery, os, time
 mod = importlib.machinery.SourceFileLoader("ncdu_clean", "ncdu-clean").load_module()
 script = "/tmp/ncdu-clean-slow-ai.py"
 open(script, "w", encoding="utf-8").write(
@@ -129,10 +150,19 @@ assert any(text.startswith('{"items":') and "[]" not in text for text in seen), 
 assert any("looking" in text for text in thinks), thinks
 fenced = b'```json\n{"items": [{"path": "/tmp/a", "action": "delete"}]}\n```'
 assert mod._json_plan(fenced)["items"][0]["path"] == "/tmp/a"
+os.environ["NCDU_CLEAN_AI"] = "sleep 30"
+started = time.monotonic()
+try:
+    mod.run_ai({"items": []}, cancel=lambda: True)
+    raise SystemExit("cancel must stop the command")
+except mod.SuggestCancelled:
+    pass
+elapsed = time.monotonic() - started
+assert elapsed < 2, elapsed
 PY
 
-python3 - <<'PY'
-import importlib.machinery
+python3 - "$T" <<'PY'
+import importlib.machinery, json, os, sys
 mod = importlib.machinery.SourceFileLoader("ncdu_clean", "ncdu-clean").load_module()
 GiB = 1024 ** 3
 disks = [
@@ -163,6 +193,39 @@ assert mod._json_plan(raw.encode())["items"]
 view = "\n".join(mod.reply_lines(raw))
 assert "{" not in view and "/mnt/win/Program Files" in view, view
 assert "Writing the plan." in mod.reply_lines('{"items":[', waiting=True)[0]
+junk = '{"items":[{"path":"}/home/tom/x","action":"delete","reason":"no"}]}'
+assert mod.salvage_plan(junk) is None
+essay = (
+    'Thinking Process:\n'
+    'shape: {"items": [{"path": "...", "action": "delete|quarantine", "reason": "..."}], '
+    '"quarantine_to": {"path": "...", "create": true, "reason": "..."}}\n'
+    '1. `/mnt/win/t4c_trace.log`: Delete (trace log).\n'
+    '2. `/mnt/win/$WINDOWS.~BT`: Quarantine (old downloads).\n'
+    '3. `/mnt/win/Windows/Installer`: Delete (safe after install).\n'
+    '4. `/mnt/win/Windows/SoftwareDistribution` (3698MB) -> Delete or Quarantine.\n'
+)
+plan = mod.salvage_plan(essay)
+paths = {row["path"]: row["action"] for row in plan["items"]}
+assert paths["/mnt/win/t4c_trace.log"] == "delete", plan
+assert paths["/mnt/win/$WINDOWS.~BT"] == "quarantine", plan
+assert paths["/mnt/win/Windows/Installer"] == "delete", plan
+assert paths["/mnt/win/Windows/SoftwareDistribution"] == "quarantine", plan
+assert "..." not in paths, plan
+parsed = mod._json_plan(essay.encode())
+assert {row["path"] for row in parsed["items"]} == set(paths), parsed
+try:
+    mod._json_plan(b'{"items":[{"path":"...","action":"delete|quarantine","reason":"..."}]}')
+    raise SystemExit("example object was accepted")
+except json.JSONDecodeError:
+    pass
+os.environ["XDG_STATE_HOME"] = sys.argv[1]
+first = mod.append_suggest_history("looked at caches", '{"items":[]}')
+second = mod.append_suggest_history("", "")
+text = open(first, encoding="utf-8").read()
+assert text.count("=== ") == 2, text
+assert "looked at caches" in text and "(no thinking)" in text and "(no reply)" in text
+think, err, done = mod._split_think("THINK\thello\nTHINK_DONE\t3.5\n")
+assert think == "hello" and done == "3.5" and err == "", (think, err, done)
 PY
 
 echo "OK"

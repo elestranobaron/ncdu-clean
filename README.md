@@ -31,12 +31,17 @@ dropped, and so are a top-level path, the home directory and the scan root.
 A directory is dropped when the plan gives another action to something inside
 it. The suggestion writes lists when you ask for them. It also reads the mounted
 disks, their free space, and disks that are present but not mounted, and it
-asks the model for one quarantine folder on a disk that can hold the move.
+asks the model for one quarantine folder. A removable disk is used first. A
+folder on the scan disk is not kept while a removable disk is mounted.
 On a terminal the wait shows the phase, a running clock and those disks.
 The model's text is drawn on that screen as it is written.
-The plan then offers three choices: `d` deletes the suggested paths, `q`
-moves them into the quarantine folder (created when it does not exist), and
-Enter does nothing. Both actions still ask for `yes`, with the same checks.
+The plan lists the paths and the quarantine folder. The bottom line shows
+the arrows, F1, and q. F1 lists the keys. `t` moves the selected line
+from Delete to Quarantine, or the other way. `-` takes that line out of the
+plan. `d` deletes the lines under Delete, `m` moves the lines under
+Quarantine into the folder (created when it does not exist). q or Esc quits
+and returns the terminal at once. Enter returns to the file list.
+`d` and `m` still ask for `yes`, with the same checks.
 
 ```sh
 ncdu-clean suggest scan.json --delete-list delete.list --quarantine-list quarantine.list
@@ -44,13 +49,14 @@ ncdu-clean rm -r -e scan.json --from delete.list
 ncdu-clean rm -r -e scan.json --from quarantine.list --trash ~/q
 ```
 
-In the browser, `p` opens the same plan. One plan that contains both actions
-is confirmed in two passes, each with its own `yes`.
+In the browser, `p` opens the same plan. F1 lists its keys.
 
 `examples/suggest-openai.py` is a command for an OpenAI-compatible endpoint
 (Ollama, Grok, Gemini, and others). It reads `NCDU_CLEAN_AI_URL`,
 `NCDU_CLEAN_AI_MODEL` and, when the endpoint requires one, `NCDU_CLEAN_AI_KEY`.
-The key is sent only to that endpoint.
+The key is sent only to that endpoint. `NCDU_CLEAN_AI_THINK=1` asks the model
+to think first, on its own. The wait screen shows how long that took, then the
+JSON plan. The thinking text stays in `~/.local/state/ncdu-clean/suggest.log`.
 
 Translations live in `po/` (gettext). `make` builds them, `make pot` refreshes the template.
 

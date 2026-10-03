@@ -4,6 +4,7 @@
 """ncdu-clean: delete files found with ncdu, and keep a record of what was removed."""
 import argparse
 import datetime
+import errno
 import getpass
 import gettext
 import json
@@ -107,6 +108,27 @@ def default_log():
 
 def default_trash():
     return os.path.join(state_dir(), "quarantine")
+
+
+def suggest_history_path():
+    return os.path.join(state_dir(), "suggest.log")
+
+
+def append_suggest_history(think, reply):
+    """Append this run's thinking and raw reply. The key is not written."""
+    path = suggest_history_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        think = (think or "").strip() or "(no thinking)"
+        reply = (reply or "").strip() or "(no reply)"
+        with open(path, "a", encoding="utf-8", errors="replace") as fh:
+            fh.write(f"\n=== {stamp} ===\n--- think ---\n{think}\n--- reply ---\n{reply}\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        return None
+    return path
 
 
 def normalize(path):
@@ -281,12 +303,20 @@ def collect(node, parent, apparent, out):
     return size
 
 
-def compute_sizes(node, disk, app):
+def compute_sizes(node, disk, app, cancel=None, _n=None, progress=None):
     """Cumulative sizes (disk usage / apparent) of every node, keyed by id(node)."""
+    if _n is None:
+        _n = [0]
+    _n[0] += 1
+    if _n[0] % 4096 == 0:
+        if cancel and cancel():
+            raise SuggestCancelled(_("suggestion cancelled"))
+        if progress:
+            progress(_n[0])
     info = info_of(node)
     d, a = info.get("dsize", 0), info.get("asize", 0)
     for child in children_of(node):
-        cd, ca = compute_sizes(child, disk, app)
+        cd, ca = compute_sizes(child, disk, app, cancel, _n, progress)
         d += cd
         a += ca
     disk[id(node)], app[id(node)] = d, a
@@ -371,6 +401,74 @@ def check_target(path, scan, recursive, trash):
 
 # --- removal (shared by `rm` and the interactive browser) ----------------------
 
+def copy_tree(src, dst, progress):
+    """Copy src to dst file by file, then remove src. progress sees each step."""
+    files = []
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(src, followlinks=False):
+        rel = os.path.relpath(dirpath, src)
+        os.makedirs(dst if rel == os.curdir else os.path.join(dst, rel), exist_ok=True)
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            files.append(path)
+            try:
+                info = os.lstat(path)
+                if stat.S_ISREG(info.st_mode):
+                    total += info.st_size
+            except OSError:
+                pass
+    done_n = 0
+    done_b = 0
+    count = len(files)
+
+    def tick(name):
+        progress(done_n, count, done_b, total, name)
+
+    for src_file in files:
+        rel = os.path.relpath(src_file, src)
+        dest_file = os.path.join(dst, rel)
+        os.makedirs(os.path.dirname(dest_file), exist_ok=True)
+        info = os.lstat(src_file)
+        if stat.S_ISLNK(info.st_mode):
+            os.symlink(os.readlink(src_file), dest_file)
+        elif not stat.S_ISREG(info.st_mode):
+            shutil.copy2(src_file, dest_file, follow_symlinks=False)
+            done_b += info.st_size
+        else:
+            with open(src_file, "rb") as inp, open(dest_file, "wb") as out:
+                while True:
+                    block = inp.read(4 << 20)
+                    if not block:
+                        break
+                    out.write(block)
+                    done_b += len(block)
+                    tick(rel)
+            try:
+                shutil.copystat(src_file, dest_file, follow_symlinks=False)
+            except OSError:
+                pass
+        done_n += 1
+        tick(rel)
+        os.unlink(src_file)
+    for dirpath, _dirnames, _filenames in os.walk(src, topdown=False):
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            pass
+    tick("")
+
+
+def move_path(src, dst, progress):
+    """Rename when both sides are one disk. Otherwise copy with progress."""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+        os.rename(src, dst)
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+        copy_tree(src, dst, progress)
+
+
 def journal_sync(logfh, log_path):
     """Flush the journal file and its directory before any removal."""
     logfh.flush()
@@ -414,7 +512,24 @@ def run_removal(paths, scan, recursive, trash, yes, log_path, hint=True):
     ok = refused = failed = 0
     total = 0
     gone_paths = []
-    for path in paths:
+    painted = {"on": False, "at": 0.0}
+
+    def _move_progress(done_n, count, done_b, total_b, name):
+        now = time.monotonic()
+        if done_n < count and now - painted["at"] < 0.15:
+            return
+        painted["at"] = now
+        painted["on"] = True
+        width = shutil.get_terminal_size((80, 24)).columns
+        line = _("  {done}/{count} files   {got} / {size}   {name}").format(
+            done=done_n, count=count, got=human(done_b), size=human(total_b), name=name)
+        shown = line[:max(width - 1, 1)]
+        if sys.stdout.isatty():
+            print("\r" + shown.ljust(max(width - 1, 1)), end="", flush=True)
+        else:
+            print(shown, flush=True)
+
+    for index, path in enumerate(paths, 1):
         try:
             recs, verified = check_target(path, scan, recursive, trash)
         except Refuse as r:
@@ -448,8 +563,12 @@ def run_removal(paths, scan, recursive, trash, yes, log_path, hint=True):
         try:
             if trash:
                 dest = os.path.join(trash, run, path.lstrip("/"))
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                shutil.move(path, dest)
+                print(_("Moving {n}/{total}  {path}").format(
+                    n=index, total=len(paths), path=path), flush=True)
+                move_path(path, dest, _move_progress)
+                if painted["on"]:
+                    print()
+                    painted["on"] = False
             elif recs[0]["type"] == "dir":
                 shutil.rmtree(path) if len(recs) > 1 else os.rmdir(path)
             else:
@@ -917,6 +1036,12 @@ def mount_of(path, disks):
     return best
 
 
+def external_disk(disk):
+    """A removable disk or a mount under /media."""
+    mount = disk.get("mount") or ""
+    return disk.get("kind") == "removable" or mount.startswith(("/media/", "/run/media/"))
+
+
 def disk_useful(disk):
     """Boot partitions and tiny mounts are not places for a quarantine."""
     mount = disk.get("mount") or ""
@@ -963,44 +1088,45 @@ def disk_rows(disks, limit=6, scan_root=None):
     return lines, max(0, len(shown) - limit)
 
 
-def build_payload(root, cancel=None, disks=None):
-    """Summary of the export, plus an index of every path in it."""
+def build_payload(root, cancel=None, disks=None, progress=None):
+    """Summary of the export, plus an index of the entries sent to the model."""
     disk, _app = {}, {}
-    compute_sizes(root, disk, _app)
+    counted = [0]
+    compute_sizes(root, disk, _app, cancel, counted, progress)
     index = {}
-    seen = [0]
+    candidates = []
 
-    def walk(node, parent):
-        seen[0] += 1
-        if cancel and seen[0] % 8192 == 0 and cancel():
-            raise SuggestCancelled(_("suggestion cancelled"))
+    def walk(node, parent, depth):
         info = info_of(node)
-        path = info["name"] if parent is None else os.path.join(parent, info["name"])
-        path = normalize(path)
+        name = info["name"]
+        path = name if parent is None else parent + "/" + name
         is_dir = isinstance(node, list)
-        rec = {
-            "path": path,
-            "type": "dir" if is_dir else "file",
-            "size": disk.get(id(node), 0),
-            "node": node,
-        }
-        if "mtime" in info:
-            rec["mtime"] = info["mtime"]
-        index[path] = rec
-        for child in children_of(node):
-            walk(child, path)
+        if depth >= 1:
+            rec = {
+                "path": path,
+                "type": "dir" if is_dir else "file",
+                "size": disk.get(id(node), 0),
+                "node": node,
+            }
+            if "mtime" in info:
+                rec["mtime"] = info["mtime"]
+            candidates.append(rec)
+        if is_dir and depth < 4:
+            for child in children_of(node):
+                walk(child, path, depth + 1)
 
-    walk(root, None)
-    root_path = normalize(info_of(root)["name"])
-    rows = [index[path] for path in index if path != root_path]
+    walk(root, None, 0)
+    root_path = info_of(root)["name"]
+    if not root_path.startswith("/"):
+        root_path = normalize(root_path)
 
-    def depth(path):
+    def depth_of(path):
         extra = path[len(root_path):].strip("/")
         return 0 if not extra else extra.count("/") + 1
 
     chosen, seen = [], set()
     for level in (1, 2, 3, 4):
-        level_rows = [rec for rec in rows if depth(rec["path"]) == level]
+        level_rows = [rec for rec in candidates if depth_of(rec["path"]) == level]
         level_rows.sort(key=lambda rec: rec["size"], reverse=True)
         for rec in level_rows:
             if rec["path"] in seen or suggestion_block(rec["path"]):
@@ -1012,31 +1138,35 @@ def build_payload(root, cancel=None, disks=None):
         if len(chosen) >= SUGGEST_ITEMS:
             break
     if len(chosen) < SUGGEST_ITEMS:
-        for rec in sorted(rows, key=lambda rec: rec["size"], reverse=True):
-            if rec["path"] in seen or rec["type"] != "file":
+        files = [rec for rec in candidates if rec["type"] == "file"]
+        files.sort(key=lambda rec: rec["size"], reverse=True)
+        for rec in files:
+            if rec["path"] in seen:
                 continue
             chosen.append(rec)
             seen.add(rec["path"])
             if len(chosen) >= SUGGEST_ITEMS:
                 break
+    for rec in chosen:
+        index[rec["path"]] = rec
     items = [{"path": rec["path"], "type": rec["type"], "size": rec["size"]} for rec in chosen]
     if disks is None:
         disks = list_storage()
     public = []
-    for disk in [disk for disk in disks if disk_useful(disk)][:24]:
+    for disk_row in [row for row in disks if disk_useful(row)][:24]:
         row = {
-            "mount": disk.get("mount") or "",
-            "device": disk.get("device") or "",
-            "fs": disk.get("fs") or "",
-            "size": disk.get("size", 0),
-            "free": disk.get("free", 0),
-            "kind": disk.get("kind") or "disk",
-            "writable": bool(disk.get("writable")),
+            "mount": disk_row.get("mount") or "",
+            "device": disk_row.get("device") or "",
+            "fs": disk_row.get("fs") or "",
+            "size": disk_row.get("size", 0),
+            "free": disk_row.get("free", 0),
+            "kind": disk_row.get("kind") or "disk",
+            "writable": bool(disk_row.get("writable")),
         }
-        if disk.get("model"):
-            row["model"] = disk["model"]
+        if disk_row.get("model"):
+            row["model"] = disk_row["model"]
         public.append(row)
-    return {"root": root_path, "total": len(rows), "items": items, "disks": public}, index
+    return {"root": root_path, "total": max(counted[0] - 1, 0), "items": items, "disks": public}, index, (disk, _app)
 
 
 def ai_argv():
@@ -1053,17 +1183,53 @@ def ai_argv():
 
 
 def _split_think(text):
-    """Thinking lines are marked by the example client. The rest is the real error."""
+    """Thinking lines are marked by the example client. The rest is the real error.
+
+    THINK_DONE is the signal that thinking has finished, with its duration in seconds."""
     think, err = [], []
+    done = None
     for line in text.splitlines():
-        if line.startswith("THINK\t"):
+        if line.startswith("THINK_DONE\t"):
+            done = line[11:].strip()
+        elif line.startswith("THINK\t"):
             think.append(line[6:])
         elif line.strip():
             err.append(line)
-    return "".join(think), "\n".join(err).strip()
+    return "".join(think), "\n".join(err).strip(), done
 
 
-def run_ai(payload, cancel=None, on_text=None, on_think=None):
+def quit_now():
+    """Restore the terminal and leave. Does not wait for a count or a model."""
+    import curses
+    try:
+        curses.endwin()
+    except curses.error:
+        pass
+    os._exit(0)
+
+
+def _stop_proc(proc):
+    """Kill the suggestion command and close its pipes so readers unblock."""
+    if proc is None:
+        return
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def run_ai(payload, cancel=None, on_text=None, on_think=None, on_think_done=None, proc_slot=None):
     """Run NCDU_CLEAN_AI. Return the parsed JSON plan. Never writes the journal.
 
     cancel() is checked while the command runs. A true result stops it.
@@ -1100,25 +1266,28 @@ def run_ai(payload, cancel=None, on_text=None, on_think=None):
         try:
             proc = subprocess.Popen(
                 argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                bufsize=0)
+                bufsize=0, start_new_session=True)
         except OSError as e:
             holder["err"] = SuggestError(
                 _("cannot run {cmd}: {err}").format(cmd=argv[0], err=e.strerror))
             return
         holder["proc"] = proc
+        if proc_slot is not None:
+            proc_slot["proc"] = proc
         try:
             proc.stdin.write(data)
             proc.stdin.close()
         except (BrokenPipeError, OSError) as e:
-            proc.kill()
-            proc.wait()
+            _stop_proc(proc)
             holder["err"] = SuggestError(_("cannot run {cmd}: {err}").format(cmd=argv[0], err=e))
             return
 
         def watch_think(text):
-            _think, _err = _split_think(text)
+            _think, _err, done = _split_think(text)
             if on_think and _think:
                 on_think(_think)
+            if done is not None and on_think_done:
+                on_think_done(done)
 
         out_box = {}
         err_box = {}
@@ -1148,16 +1317,13 @@ def run_ai(payload, cancel=None, on_text=None, on_think=None):
                 if proc is None:
                     reader.join(0.05)
                     continue
-                if proc.poll() is None:
-                    proc.kill()
-                reader.join()
+                _stop_proc(proc)
+                reader.join(0.3)
                 raise SuggestCancelled(_("suggestion cancelled"))
             reader.join(0.05)
     except KeyboardInterrupt:
-        proc = holder.get("proc")
-        if proc is not None and proc.poll() is None:
-            proc.kill()
-        reader.join()
+        _stop_proc(holder.get("proc"))
+        reader.join(0.3)
         raise
     if "err" in holder:
         raise holder["err"]
@@ -1168,7 +1334,7 @@ def run_ai(payload, cancel=None, on_text=None, on_think=None):
         raise SuggestError(_("suggestion is too large"))
     if proc.returncode != 0:
         salvaged = salvage_plan(out.decode("utf-8", "replace"))
-        _think, text = _split_think(err.decode("utf-8", "replace"))
+        _think, text, _done = _split_think(err.decode("utf-8", "replace"))
         if salvaged and "not JSON" in text:
             return salvaged
         tail = text[-2000:] if text else _("exit {code}").format(code=proc.returncode)
@@ -1189,6 +1355,52 @@ def _field(window, key):
         return match.group(1)
 
 
+def _item_ok(raw):
+    """A real plan line. The prompt's example path and action are not one."""
+    if not isinstance(raw, dict):
+        return False
+    path, action = raw.get("path"), raw.get("action")
+    if not isinstance(path, str) or not path.startswith("/") or "..." in path:
+        return False
+    if any(ch in path for ch in "{}\n\t\"'"):
+        return False
+    return action in ("delete", "quarantine")
+
+
+def _plan_ok(obj):
+    """An items list. Empty is a plan. The prompt example is not."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("items"), list):
+        return False
+    items = obj["items"]
+    return not items or any(_item_ok(item) for item in items)
+
+
+def _prose_plan(text):
+    """Decisions written as '/path: Delete' when the model never reaches JSON."""
+    found = {}
+    pattern = re.compile(
+        r"(/[^`\n\"']{1,240}?)\s*`?\s*(?:\([^)]{0,48}\))?\s*(?::|->)\s*([^\n]{0,48})",
+        re.IGNORECASE)
+    for match in pattern.finditer(text):
+        path = match.group(1).strip().strip("`\"'").rstrip(".,;")
+        if not _item_ok({"path": path, "action": "delete"}):
+            continue
+        window = match.group(2)
+        head = re.match(
+            r"\s*(?:\*\*)?(delete|quarantine)\b(?:\s+or\s+(delete|quarantine)\b)?",
+            window, re.IGNORECASE)
+        if not head:
+            continue
+        words = {head.group(1).lower()}
+        if head.group(2):
+            words.add(head.group(2).lower())
+        action = "quarantine" if "quarantine" in words else "delete"
+        found[path] = {"path": path, "action": action, "reason": ""}
+    if not found:
+        return None
+    return {"items": list(found.values())}
+
+
 def salvage_plan(text):
     """Pull paths out of a reply whose JSON is missing a colon or a comma."""
     if isinstance(text, bytes):
@@ -1207,10 +1419,12 @@ def salvage_plan(text):
         reason = _field(window, "reason") or ""
         if not path or action not in ("delete", "quarantine") or path in seen:
             continue
+        if not path.startswith("/") or any(ch in path for ch in "{}\n\t"):
+            continue
         seen.add(path)
         items.append({"path": path, "action": action, "reason": reason})
     if not items:
-        return None
+        return _prose_plan(text)
     plan = {"items": items}
     at = text.find('"quarantine_to"')
     if at >= 0:
@@ -1250,19 +1464,24 @@ def _json_plan(raw):
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         text = "\n".join(lines).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                return json.loads(text[start:end + 1])
-            except json.JSONDecodeError:
-                pass
-        salvaged = salvage_plan(text)
-        if salvaged:
-            return salvaged
-        raise json.JSONDecodeError("no plan", text, 0)
+    decoder = json.JSONDecoder()
+    start = 0
+    while True:
+        brace = text.find("{", start)
+        if brace < 0:
+            break
+        try:
+            found, end = decoder.raw_decode(text, brace)
+        except json.JSONDecodeError:
+            start = brace + 1
+            continue
+        if _plan_ok(found):
+            return found
+        start = end if end > brace else brace + 1
+    salvaged = salvage_plan(text)
+    if salvaged:
+        return salvaged
+    raise json.JSONDecodeError("no plan", text, 0)
 
 
 def _drop(dropped, path, reason):
@@ -1359,9 +1578,10 @@ def choose_quarantine_dir(raw, disks, scan_root, need, forbidden):
     """A folder on a known writable disk, large enough when the move copies.
 
     The model's folder is kept when it sits on such a disk and does not overlap
-    a path in the plan. Otherwise the writable disk with the most free space,
-    other than the scan's disk, is used. One folder: the original paths are
-    kept inside it."""
+    a path in the plan. A removable disk comes first: a folder on the scan disk
+    is not kept while one is mounted. Otherwise the writable disk with the most
+    free space, other than the scan's disk, is used. One folder: the original
+    paths are kept inside it."""
     if isinstance(raw, str):
         raw = {"path": raw, "create": True, "reason": ""}
     mounts = [disk for disk in disks if disk.get("mount") and disk.get("writable")]
@@ -1388,6 +1608,11 @@ def choose_quarantine_dir(raw, disks, scan_root, need, forbidden):
         }
 
     def fallback():
+        externals = [disk for disk in mounts if external_disk(disk)]
+        externals.sort(key=lambda disk: disk.get("free", 0), reverse=True)
+        if externals:
+            path = os.path.join(externals[0]["mount"], "ncdu-clean")
+            return pack(path, _("Removable disk with the most free space."), externals[0])
         others = [disk for disk in mounts if fits(disk) and not same_disk(disk)]
         others.sort(key=lambda disk: disk.get("free", 0), reverse=True)
         if others:
@@ -1417,6 +1642,8 @@ def choose_quarantine_dir(raw, disks, scan_root, need, forbidden):
     disk = mount_of(path, mounts)
     if disk is None or not fits(disk):
         return fallback()
+    if any(external_disk(item) for item in mounts) and not external_disk(disk):
+        return fallback()
     for bad in forbidden:
         bad = normalize(bad)
         if path == bad or path.startswith(bad + "/") or bad.startswith(path + "/"):
@@ -1434,7 +1661,7 @@ def choose_quarantine_dir(raw, disks, scan_root, need, forbidden):
 
 
 def suggest_plan(root):
-    payload, index = build_payload(root)
+    payload, index, _sizes = build_payload(root)
     shown, total = len(payload["items"]), payload["total"]
     plan = run_ai(payload)
     accepted, dropped = filter_plan(plan, index, root)
@@ -1668,7 +1895,7 @@ class Browser:
             _("  Space            mark / unmark (a file, or a whole directory)"),
             _("  [*] marked directly   [+] covered by a marked directory above"),
             _("  c                clear the selection"),
-            _("  p                suggestion: d delete, q quarantine, Enter does nothing"),
+            _("  p                open the suggestion plan (F1 lists its keys)"),
             _("  x                act on the selection: simulate it, then delete,"),
             _("                   quarantine it or save the list to a file"),
             "",
@@ -1691,7 +1918,8 @@ class Browser:
         self.sort = "size"
         self.marked = {}      # path -> export node (None if unknown)
         self.msg = ""
-        self.recompute()
+        self.disk = self.app = None
+        self.hard_quit = False
 
     def recompute(self):
         self.disk, self.app = {}, {}
@@ -1856,19 +2084,34 @@ class Browser:
                  "scan": normalize(info_of(self.root)["name"])}
         holder = {}
 
+        def note_think(text):
+            state["think"] = text
+            if "think_at" not in state:
+                state["think_at"] = time.monotonic()
+
+        def note_think_done(raw):
+            try:
+                state["think_s"] = float(raw)
+            except ValueError:
+                state["think_s"] = 0
+
         def work():
             try:
                 state["phase"] = "prepare"
                 disks = list_storage()
                 state["disks"] = disks
-                payload, index = build_payload(
-                    self.root, cancel=lambda: state["cancel"], disks=disks)
+                payload, index, sizes = build_payload(
+                    self.root, cancel=lambda: state["cancel"], disks=disks,
+                    progress=lambda n: state.__setitem__("counted", n))
+                holder["sizes"] = sizes
                 state["phase"] = "ask"
                 state["sent"] = len(payload["items"])
                 state["total"] = payload["total"]
                 plan = run_ai(payload, cancel=lambda: state["cancel"],
                               on_text=lambda text: state.__setitem__("reply", text),
-                              on_think=lambda text: state.__setitem__("think", text))
+                              on_think=note_think,
+                              on_think_done=note_think_done,
+                              proc_slot=state)
                 state["phase"] = "read"
                 accepted, dropped = filter_plan(plan, index, self.root)
                 need = sum(row.get("size", 0) for row in accepted if row["action"] == "quarantine")
@@ -1893,13 +2136,21 @@ class Browser:
                 if key in (10, 13, curses.KEY_ENTER):
                     note = _("Enter received. Still working. The file list is not open.")
                 elif key in (ord("q"), 27):
-                    state["cancel"] = True
-                    note = _("Cancel received. Stopping. The file list is not open yet.")
+                    _stop_proc(state.get("proc"))
+                    quit_now()
                 elif key not in (-1,):
                     note = _("Key received. Still working. The file list is not open.")
         finally:
             scr.timeout(-1)
+        if state.get("cancel"):
+            worker.join(0.5)
+            append_suggest_history(state.get("think") or "", state.get("reply") or "")
+            self.msg = _("Cancelled. Nothing was deleted. This is the file list.")
+            return
         worker.join()
+        if holder.get("sizes"):
+            self.disk, self.app = holder["sizes"]
+        history = append_suggest_history(state.get("think") or "", state.get("reply") or "")
         scr.timeout(0)
         while scr.getch() != -1:
             pass
@@ -1926,7 +2177,7 @@ class Browser:
         except OSError as e:
             self.notice_screen(scr, [_("Cannot write: {err}").format(err=e.strerror)])
             return
-        self.plan_screen(scr, accepted, dropped, shown, total, dest, state["disks"])
+        self.plan_screen(scr, accepted, dropped, shown, total, dest, state["disks"], history)
 
     def plan_groups(self, accepted, dropped):
         def pack(action):
@@ -1960,7 +2211,14 @@ class Browser:
                 return
             phase = state.get("phase")
             mark = "|/-\\"[spin % 4]
-            if phase == "ask":
+            if phase == "ask" and state.get("think_s") is not None:
+                title = _("Writing the plan.")
+                detail = _("Thought for {time}.").format(time=fmt_clock(state["think_s"]))
+            elif phase == "ask" and state.get("think_at"):
+                title = _("Thinking")
+                detail = _("Thinking for {time}.").format(
+                    time=fmt_clock(time.monotonic() - state["think_at"]))
+            elif phase == "ask":
                 title = _("Asking the model")
                 detail = _("Sent {sent} entries out of {total}. Waiting for the answer.") \
                     .format(sent=state.get("sent", 0), total=state.get("total", 0))
@@ -1969,21 +2227,17 @@ class Browser:
                 detail = _("The model has answered. Nothing is deleted yet.")
             else:
                 title = _("Preparing the summary")
-                detail = _("The export is loaded. The model has not been asked yet.")
+                detail = _("Counting {n} entries. The model is not called yet.") \
+                    .format(n=state.get("counted", 0))
             header = _(" ncdu-clean · suggestion") + " · " + self.scan_name \
                 + " · " + fmt_clock(elapsed)
             scr.addnstr(0, 0, header.ljust(w - 1), w - 1, curses.A_REVERSE)
             scr.addnstr(2, 0, f" {mark}  {title}".ljust(w - 1), w - 1, curses.A_BOLD)
             scr.addnstr(3, 0, (" " + detail).ljust(w - 1), w - 1)
             reply = state.get("reply") or ""
-            think = state.get("think") or ""
-            if reply or think:
-                if reply:
-                    label = _("Suggestion")
-                    view = reply_lines(reply, waiting=(phase == "ask"))
-                else:
-                    label = _("Thinking")
-                    view = self._tail(think, w - 2, max(h - 8, 1))
+            if reply:
+                label = _("Suggestion")
+                view = reply_lines(reply, waiting=(phase == "ask"))
                 if phase == "ask" and view:
                     view[-1] += "█"
                 scr.addnstr(5, 0, (" " + label).ljust(w - 1), w - 1, curses.A_BOLD)
@@ -1992,7 +2246,7 @@ class Browser:
                     scr.addnstr(6 + i, 0, self._fit(line, w - 1).ljust(w - 1), w - 1)
             else:
                 scr.addnstr(4, 0, (" " + _("Nothing is deleted.")).ljust(w - 1), w - 1)
-                if phase == "ask":
+                if phase == "ask" and not state.get("think_at"):
                     scr.addnstr(5, 0, (" " + _("Waiting for the first word.")).ljust(w - 1),
                                 w - 1, curses.A_BOLD)
                 scr.addnstr(7, 0, (" " + _("Disks")).ljust(w - 1), w - 1, curses.A_BOLD)
@@ -2146,12 +2400,34 @@ class Browser:
         scr.refresh()
         return acted
 
-    def plan_screen(self, scr, accepted, dropped, shown, total, dest, disks):
-        """The plan, the disks, and three choices. Nothing is removed on this screen."""
+    def plan_help_lines(self):
+        return [
+            _("Plan"),
+            "",
+            _("  Up Down / j k    move between lines"),
+            _("  PgUp PgDn        move by a page"),
+            _("  g G              first line, last line"),
+            "",
+            _("  t                move the selected line from Delete to Quarantine,"),
+            _("                   or from Quarantine to Delete"),
+            _("  -                take the selected line out of the plan"),
+            "",
+            _("  d                delete the lines under Delete"),
+            _("                   asks for confirmation; nothing happens before yes"),
+            _("  m                move the lines under Quarantine into the folder"),
+            _("                   asks for confirmation; nothing happens before yes"),
+            "",
+            _("  F1 ?             this help"),
+            _("  q Esc            quit; nothing is deleted or moved"),
+        ]
+
+    def plan_screen(self, scr, accepted, dropped, shown, total, dest, disks, history=None):
+        """The plan and the disks. Nothing is removed on this screen."""
         import curses
         live = [row for row in accepted if row.get("action") in ("delete", "quarantine")]
         dropped_live = list(dropped)
         cursor = 0
+        follow = None
         self._plan_top = 0
         while True:
             deletes, delete_size, quarantines, quarantine_size, dropped_rows = self.plan_groups(
@@ -2164,6 +2440,12 @@ class Browser:
             if dropped_rows:
                 groups.append(("drop", "[-]", _("Dropped"), dropped_rows, None))
             items = [row for _kind, _tag, _title, rows, _size in groups for row in rows]
+            if follow:
+                for index, row in enumerate(items):
+                    if row.get("path") == follow:
+                        cursor = index
+                        break
+                follow = None
             h, w = scr.getmaxyx()
             scr.erase()
             if h < 8 or w < 40:
@@ -2193,12 +2475,16 @@ class Browser:
             elif dest.get("mount"):
                 detail.append(_("{free} free on {mount}.").format(
                     free=human(dest.get("free", 0)), mount=dest["mount"]))
+                if quarantine_size > dest.get("free", 0):
+                    detail.append(_("The quarantine is larger than the free space."))
             if dest.get("kind") == "removable":
                 detail.append(_("Removable disk."))
             if dest.get("reason"):
                 detail.append(dest["reason"])
             if detail:
                 pinned.append(" " + "  ".join(detail))
+            if history:
+                pinned.append(_(" Reflection: {path}").format(path=history))
             pinned = pinned[:max(4, h - 10)]
             for i, line in enumerate(pinned):
                 scr.addnstr(2 + i, 0, self._fit(line, w - 1).ljust(w - 1), w - 1,
@@ -2258,13 +2544,7 @@ class Browser:
             if quarantines:
                 status.append(_("Quarantine sets aside {size}.").format(size=human(quarantine_size)))
             scr.addnstr(h - 2, 0, (" " + "  ·  ".join(status)).ljust(w - 1), w - 1, curses.A_BOLD)
-            if deletes and quarantines:
-                keys = _(" d delete these · q quarantine the others · Enter do nothing")
-            elif deletes or quarantines:
-                keys = _(" d delete these · q quarantine these · Enter do nothing")
-            else:
-                keys = _(" Enter back to the file list")
-            scr.addnstr(h - 1, 0, keys.ljust(w - 1), w - 1)
+            scr.addnstr(h - 1, 0, _(" arrows    F1 help    q quits").ljust(w - 1), w - 1)
             scr.refresh()
             k = scr.getch()
             if k in (curses.KEY_DOWN, ord("j")) and items:
@@ -2279,26 +2559,47 @@ class Browser:
                 cursor = 0
             elif k in (curses.KEY_END, ord("G")) and items:
                 cursor = len(items) - 1
-            elif k in (ord("d"), ord("q")) and (deletes or quarantines):
-                if deletes and quarantines:
-                    rows = deletes if k == ord("d") else quarantines
-                else:
-                    rows = deletes or quarantines
-                trash = None if k == ord("d") else dest["path"]
-                self._ack(scr, _("d received. Nothing is deleted until you type yes.") if not trash
-                          else _("q received. Nothing is moved until you type yes."))
-                if self.run_suggested(scr, rows, trash):
-                    gone = {row["path"] for row in rows}
+            elif k in (curses.KEY_F1, ord("?")):
+                self.show_help(scr, self.plan_help_lines())
+            elif k == ord("t") and items:
+                row = items[cursor]
+                if row.get("action") == "delete":
+                    row["action"] = "quarantine"
+                    follow = row.get("path")
+                elif row.get("action") == "quarantine":
+                    row["action"] = "delete"
+                    follow = row.get("path")
+            elif k == ord("-") and items:
+                row = items[cursor]
+                if row.get("action") in ("delete", "quarantine"):
+                    path = row.get("path")
+                    live = [item for item in live if item.get("path") != path]
+                    dropped_live.append({"path": path, "reason": _("taken out of the plan")})
+                    follow = path
+            elif k == ord("d") and deletes:
+                self._ack(scr, _("d received. Nothing is deleted until you type yes."))
+                if self.run_suggested(scr, deletes, None):
+                    gone = {row["path"] for row in deletes}
                     live = [row for row in live if row["path"] not in gone]
                     if not live:
                         self.msg = _("Done. Nothing else from this suggestion.")
                         return
-            elif k in (10, 13, curses.KEY_ENTER, 27, ord("x")):
-                self._ack(scr, _("Enter received. Nothing was deleted."))
+            elif k == ord("m") and quarantines:
+                self._ack(scr, _("m received. Nothing is moved until you type yes."))
+                if self.run_suggested(scr, quarantines, dest["path"]):
+                    gone = {row["path"] for row in quarantines}
+                    live = [row for row in live if row["path"] not in gone]
+                    if not live:
+                        self.msg = _("Done. Nothing else from this suggestion.")
+                        return
+            elif k in (ord("q"), 27):
+                quit_now()
+            elif k in (10, 13, curses.KEY_ENTER, ord("x")):
                 self.msg = _("Nothing was deleted.")
                 return
 
     def _ack(self, scr, text):
+        import curses
         h, w = scr.getmaxyx()
         scr.addnstr(h - 2, 0, (" " + text).ljust(max(w - 1, 1)), max(w - 1, 1), curses.A_REVERSE)
         scr.refresh()
@@ -2311,6 +2612,8 @@ class Browser:
 
     def draw(self, scr):
         import curses
+        if not self.disk:
+            self.recompute()
         scr.erase()
         h, w = scr.getmaxyx()
         if h < 6 or w < 40:
@@ -2358,10 +2661,10 @@ class Browser:
                                 "c clear · s/n sort · a size · ? help · q quit"), w - 1)
         scr.refresh()
 
-    def show_help(self, scr):
+    def show_help(self, scr, lines=None):
         scr.erase()
         h, w = scr.getmaxyx()
-        lines = self.help_lines()
+        lines = self.help_lines() if lines is None else lines
         for i, line in enumerate(lines[:h - 2]):
             scr.addnstr(i + 1, 2, line, max(w - 3, 1))
         scr.addnstr(min(len(lines) + 2, h - 1), 2, _("(press any key to go back)"), max(w - 3, 1))
@@ -2378,6 +2681,8 @@ class Browser:
             rows = self.entries()
             self.msg = ""
             if k == ord("q"):
+                if self.hard_quit:
+                    quit_now()
                 return
             elif k in (curses.KEY_DOWN, ord("j")):
                 self.cursor += 1
@@ -2430,7 +2735,7 @@ class Browser:
                 self.sort = "name"
             elif k == ord("a"):
                 self.apparent = not self.apparent
-            elif k == ord("?"):
+            elif k in (ord("?"), curses.KEY_F1):
                 self.show_help(scr)
 
 
@@ -2463,6 +2768,7 @@ def suggest_ui(a):
         except Aborted:
             return None
         browser = Browser(root, os.path.basename(a.export), None, default_log())
+        browser.hard_quit = True
         browser.present_suggestion(scr, a.delete_list, a.quarantine_list)
         browser.run(scr)
         return browser

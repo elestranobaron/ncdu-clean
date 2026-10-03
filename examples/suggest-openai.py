@@ -13,6 +13,7 @@ The key stays in the environment and is not printed.
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -29,13 +30,23 @@ PROMPT = (
     "action is delete or quarantine. "
     "Copy item paths exactly from items. Do not invent item paths. "
     "quarantine_to.path is one folder on a writable mount from disks. "
-    "Prefer a mount other than the scan root, with enough free bytes for the quarantine. "
+    "Prefer a removable disk. Do not put the folder on the scan disk when a "
+    "removable disk is listed. "
+    "The scan disk must be freed. The removable disk's free space is the room "
+    "for quarantine. "
+    "delete is for caches, temporary files, dumps and old update folders. "
+    "Then quarantine the largest other items, including a whole installed "
+    "program, until the quarantined sizes are close to that free space. "
+    "Do not stop once the caches are listed when larger items are in the list. "
+    "Do not take the Program Files directory or Program Files (x86) as one item: "
+    "that is every program at once. Do take the large programs inside them "
+    "when those programs are in the list. "
     "create is true when that folder does not exist yet. "
     "The program keeps the original paths inside that one folder. "
-    "Do not suggest a user profile, pagefile.sys, swapfile.sys, hiberfil.sys, "
+    "Never suggest a user profile, pagefile.sys, swapfile.sys, hiberfil.sys, "
     "or the Windows, System32, SysWOW64 or WinSxS directories. "
-    "Prefer caches, temporary files, dumps and old update folders. "
-    "Use quarantine when unsure. One short reason, a single line."
+    "Those break the system. One short reason, a single line. "
+    "The answer itself is only that JSON object."
 )
 
 
@@ -74,12 +85,42 @@ def extract_json(text):
             lines = lines[:-1]
         text = "\n".join(lines).strip()
     try:
-        return json.loads(text)
+        obj = json.loads(text)
     except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(text[start:end + 1])
-        raise
+        obj = None
+    items = obj.get("items") if isinstance(obj, dict) else None
+    if isinstance(items, list) and (
+            not items or any(
+                isinstance(item, dict)
+                and isinstance(item.get("path"), str)
+                and item["path"].startswith("/")
+                and "..." not in item["path"]
+                and item.get("action") in ("delete", "quarantine")
+                for item in items)):
+        return obj
+    decoder = json.JSONDecoder()
+    start = 0
+    while True:
+        brace = text.find("{", start)
+        if brace < 0:
+            break
+        try:
+            found, end = decoder.raw_decode(text, brace)
+        except json.JSONDecodeError:
+            start = brace + 1
+            continue
+        items = found.get("items") if isinstance(found, dict) else None
+        if isinstance(items, list) and (
+                not items or any(
+                    isinstance(item, dict)
+                    and isinstance(item.get("path"), str)
+                    and item["path"].startswith("/")
+                    and "..." not in item["path"]
+                    and item.get("action") in ("delete", "quarantine")
+                    for item in items)):
+            return found
+        start = end if isinstance(end, int) and end > brace else brace + 1
+    raise json.JSONDecodeError("no plan", text, 0)
 
 
 def piece_text(value):
@@ -109,17 +150,31 @@ def emit_think(text):
         sys.stderr.flush()
 
 
-def read_reply(resp):
-    """Write the answer as it arrives. Thinking goes to stderr, marked THINK."""
+def read_reply(resp, on_content):
+    """Stream one reply. Reasoning deltas go to stderr. Content goes to on_content."""
     content, reasoning = [], []
+
+    def take(piece):
+        if piece:
+            content.append(piece)
+            on_content(piece)
+
     first = resp.readline()
     if not first:
         fail("model reply is empty")
     if first.lstrip().startswith(b"{"):
         raw = first + resp.read()
-        text = message_text(json.loads(raw.decode("utf-8")))
-        emit(text)
-        return text
+        payload = json.loads(raw.decode("utf-8"))
+        try:
+            message = payload["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError):
+            fail("model reply has no message")
+        thought = message.get("reasoning") or message.get("reasoning_content")
+        text = message_text(payload)
+        if isinstance(thought, str) and thought != text:
+            emit_think(thought)
+        take(text)
+        return "".join(content)
     pending = first
     while pending:
         line = pending.decode("utf-8", "replace").strip()
@@ -137,17 +192,32 @@ def read_reply(resp):
         delta = choice.get("delta") or choice.get("message") or {}
         word = piece_text(delta.get("content"))
         thought = piece_text(delta.get("reasoning")) or piece_text(delta.get("reasoning_content"))
-        if word:
-            content.append(word)
-            emit(word)
-        elif thought:
+        if thought:
             reasoning.append(thought)
             emit_think(thought)
+        if word:
+            take(word)
     if content:
         return "".join(content)
     text = "".join(reasoning)
-    emit(text)
+    take(text)
     return text
+
+
+def post(url, key, body_obj, on_content):
+    body = json.dumps(body_obj).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=None) as resp:
+            return read_reply(resp, on_content)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:2000]
+        fail(f"suggestion endpoint returned {e.code}: {detail}")
+    except urllib.error.URLError as e:
+        fail(f"suggestion endpoint unreachable: {e.reason}")
 
 
 def main():
@@ -159,30 +229,48 @@ def main():
     summary = sys.stdin.read()
     if not summary.strip():
         fail("empty summary")
-    body_obj = {
+    thinking = os.environ.get("NCDU_CLEAN_AI_THINK", "").strip() == "1"
+    essay = ""
+    if thinking:
+        started = None
+
+        def keep(piece):
+            nonlocal started
+            if started is None:
+                started = time.monotonic()
+            emit_think(piece)
+
+        essay = post(url, key, {
+            "model": model,
+            "max_tokens": 4000,
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": PROMPT + (
+                    " Think privately. End with a line that contains only DONE."
+                    " Do not write the JSON object in this step.")},
+                {"role": "user", "content": summary},
+            ],
+        }, keep) or ""
+        elapsed = 0 if started is None else time.monotonic() - started
+        sys.stderr.write(f"THINK_DONE\t{elapsed:.3f}\n")
+        sys.stderr.flush()
+    messages = [
+        {"role": "system", "content": PROMPT},
+        {"role": "user", "content": summary},
+    ]
+    if essay:
+        messages.append({"role": "assistant", "content": essay[-12000:]})
+        messages.append({"role": "user", "content":
+                         "The reasoning is finished. Reply with the JSON object only. "
+                         "Quarantine the largest items that fit in the removable disk's "
+                         "free space, including whole programs. Do not return only the small caches."})
+    text = post(url, key, {
         "model": model,
         "max_tokens": 1200,
         "stream": True,
-        "messages": [
-            {"role": "system", "content": PROMPT},
-            {"role": "user", "content": summary},
-        ],
-    }
-    if os.environ.get("NCDU_CLEAN_AI_THINK", "").strip() != "1":
-        body_obj["reasoning_effort"] = "none"
-    body = json.dumps(body_obj).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = "Bearer " + key
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=None) as resp:
-            text = read_reply(resp)
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:2000]
-        fail(f"suggestion endpoint returned {e.code}: {detail}")
-    except urllib.error.URLError as e:
-        fail(f"suggestion endpoint unreachable: {e.reason}")
+        "reasoning_effort": "none",
+        "messages": messages,
+    }, emit)
     try:
         extract_json(text)
     except (UnicodeError, json.JSONDecodeError, ValueError) as e:

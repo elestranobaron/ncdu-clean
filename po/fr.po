@@ -183,6 +183,14 @@ msgstr "suppression partielle"
 msgid "QUARANTINED"
 msgstr "MIS DE CÔTÉ"
 
+#, python-brace-format
+msgid "Moving {n}/{total}  {path}"
+msgstr "Déplacement {n}/{total}  {path}"
+
+#, python-brace-format
+msgid "  {done}/{count} files   {got} / {size}   {name}"
+msgstr "  {done}/{count} fichiers   {got} / {size}   {name}"
+
 #: ncdu-clean:479
 msgid "DELETED"
 msgstr "SUPPRIMÉ"
@@ -434,6 +442,10 @@ msgstr "Le modèle a répondu. Rien n'est encore marqué."
 msgid "Preparing the summary"
 msgstr "Préparation du résumé"
 
+#, python-brace-format
+msgid "Counting {n} entries. The model is not called yet."
+msgstr "Comptage de {n} entrées. Le modèle n'est pas encore appelé."
+
 msgid "The export is loaded. The model has not been asked yet."
 msgstr "L'export est chargé. Le modèle n'a pas encore été appelé."
 
@@ -646,8 +658,8 @@ msgid "  c                clear the selection"
 msgstr "  c                vider la sélection"
 
 #: ncdu-clean:1076
-msgid "  p                suggestion: d delete, q quarantine, Enter does nothing"
-msgstr "  p                suggestion : d supprime, q quarantaine, Entrée ne fait rien"
+msgid "  p                open the suggestion plan (F1 lists its keys)"
+msgstr "  p                ouvre le plan de suggestion (F1 liste ses touches)"
 
 #: ncdu-clean:1077
 msgid "  x                act on the selection: simulate it, then delete,"
@@ -1102,6 +1114,16 @@ msgstr "Aucun disque trouvé."
 msgid "{n} more"
 msgstr "{n} de plus"
 
+msgid "Removable disk with the most free space."
+msgstr "Clé USB avec le plus de place libre."
+
+msgid "The quarantine is larger than the free space."
+msgstr "La quarantaine est plus grosse que la place libre."
+
+#, python-brace-format
+msgid " Reflection: {path}"
+msgstr " Réflexion : {path}"
+
 msgid "Largest disk with enough free space."
 msgstr "Plus gros disque avec assez de place libre."
 
@@ -1143,20 +1165,56 @@ msgstr "Disque amovible."
 msgid "Plan ready."
 msgstr "Plan prêt."
 
-msgid " d delete these · q quarantine the others · Enter do nothing"
-msgstr " d supprime ceux-ci · q met les autres en quarantaine · Entrée ne fait rien"
+msgid " arrows    F1 help    q quits"
+msgstr " flèches    F1 aide    q quitte"
 
-msgid " d delete these · q quarantine these · Enter do nothing"
-msgstr " d supprime ceux-ci · q met ceux-ci en quarantaine · Entrée ne fait rien"
+msgid "Plan"
+msgstr "Plan"
+
+msgid "  Up Down / j k    move between lines"
+msgstr "  Haut Bas / j k   se déplacer entre les lignes"
+
+msgid "  PgUp PgDn        move by a page"
+msgstr "  PgUp PgDn        avancer d'une page"
+
+msgid "  g G              first line, last line"
+msgstr "  g G              première ligne, dernière ligne"
+
+msgid "  t                move the selected line from Delete to Quarantine,"
+msgstr "  t                passer la ligne choisie de Delete à Quarantine,"
+
+msgid "                   or from Quarantine to Delete"
+msgstr "                   ou de Quarantine à Delete"
+
+msgid "  -                take the selected line out of the plan"
+msgstr "  -                retirer la ligne choisie du plan"
+
+msgid "  d                delete the lines under Delete"
+msgstr "  d                supprimer les lignes sous Delete"
+
+msgid "                   asks for confirmation; nothing happens before yes"
+msgstr "                   demande une confirmation ; rien avant yes"
+
+msgid "  m                move the lines under Quarantine into the folder"
+msgstr "  m                déplacer les lignes sous Quarantine dans le dossier"
+
+msgid "  F1 ?             this help"
+msgstr "  F1 ?             cette aide"
+
+msgid "  q Esc            quit; nothing is deleted or moved"
+msgstr "  q Échap          quitter ; rien n'est supprimé ni déplacé"
+
+msgid "taken out of the plan"
+msgstr "retiré du plan"
+
+msgid "m received. Nothing is moved until you type yes."
+msgstr "m reçu. Rien n'est déplacé tant que tu n'as pas tapé yes."
 
 msgid " Enter back to the file list"
 msgstr " Entrée revient à la liste des fichiers"
 
 msgid "d received. Nothing is deleted until you type yes."
 msgstr "d reçu. Rien n'est supprimé tant que tu n'as pas tapé yes."
-
-msgid "q received. Nothing is moved until you type yes."
-msgstr "q reçu. Rien n'est déplacé tant que tu n'as pas tapé yes."
 
 msgid "Enter received. Nothing was deleted."
 msgstr "Entrée reçue. Rien n'a été supprimé."
@@ -1184,6 +1242,14 @@ msgstr "Modèle"
 
 msgid "Thinking"
 msgstr "Réflexion"
+
+#, python-brace-format
+msgid "Thinking for {time}."
+msgstr "Réflexion depuis {time}."
+
+#, python-brace-format
+msgid "Thought for {time}."
+msgstr "Réflexion : {time}."
 
 msgid "Waiting for the first word."
 msgstr "En attente du premier mot."
