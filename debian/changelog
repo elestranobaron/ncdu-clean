@@ -1,3 +1,11 @@
+ncdu-clean (0.2.1-1) unstable; urgency=medium
+
+  * New upstream release. suggest is part of this version.
+  * Drop the Suggests on ansible-temple.
+  * Add Vcs-Git, Vcs-Browser and a watch file.
+
+ -- Thomas Lloancy <tlloancy@deter-mi.net>  Sat, 03 Oct 2026 23:50:00 +0200
+
 ncdu-clean (0.2.0-1) unstable; urgency=medium
 
   * Initial release. (Closes: #1149569)

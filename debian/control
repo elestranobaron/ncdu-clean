@@ -10,6 +10,8 @@ Build-Depends:
 Standards-Version: 4.7.4
 Rules-Requires-Root: no
 Homepage: https://github.com/elestranobaron/ncdu-clean
+Vcs-Git: https://github.com/elestranobaron/ncdu-clean.git
+Vcs-Browser: https://github.com/elestranobaron/ncdu-clean
 
 Package: ncdu-clean
 Architecture: all
@@ -18,8 +20,6 @@ Depends:
  ${python3:Depends},
 Recommends:
  ncdu,
-Suggests:
- ansible-temple,
 Description: delete files found with ncdu, with a journal and an undo
  ncdu-clean works on an export made by ncdu. It lets you browse the export in
  a terminal, mark files and directories, and then choose what to do with the
