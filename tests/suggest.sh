@@ -226,6 +226,21 @@ assert text.count("=== ") == 2, text
 assert "looked at caches" in text and "(no thinking)" in text and "(no reply)" in text
 think, err, done = mod._split_think("THINK\thello\nTHINK_DONE\t3.5\n")
 assert think == "hello" and done == "3.5" and err == "", (think, err, done)
+import tempfile
+base = tempfile.mkdtemp()
+keep = os.path.join(base, "keep")
+open(keep, "w").close()
+gone = os.path.join(base, "gone")
+root = [{"name": base}]
+index = {keep: {"size": 1}, gone: {"size": 1}}
+accepted, dropped = mod.filter_plan(
+    {"items": [
+        {"path": keep, "action": "delete", "reason": "x"},
+        {"path": gone, "action": "delete", "reason": "x"},
+    ]},
+    index, root)
+assert [row["path"] for row in accepted] == [keep], accepted
+assert any(row["path"] == gone and row["reason"] == "no longer on the disk" for row in dropped), dropped
 PY
 
 echo "OK"

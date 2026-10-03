@@ -283,6 +283,18 @@ def find(root, path):
     return node
 
 
+def subtree_totals(node):
+    """(entries, bytes) for a node. A directory's own size is not the rollup."""
+    if not isinstance(node, list):
+        return 1, info_of(node).get("asize", 0)
+    count, size = 1, 0
+    for child in children_of(node):
+        child_n, child_b = subtree_totals(child)
+        count += child_n
+        size += child_b
+    return count, size
+
+
 def subtree_meta(node, path, out):
     """Fill out with {path: (info, is_dir)} for a whole subtree."""
     info = info_of(node)
@@ -313,6 +325,7 @@ def compute_sizes(node, disk, app, cancel=None, _n=None, progress=None):
             raise SuggestCancelled(_("suggestion cancelled"))
         if progress:
             progress(_n[0])
+            time.sleep(0)
     info = info_of(node)
     d, a = info.get("dsize", 0), info.get("asize", 0)
     for child in children_of(node):
@@ -343,8 +356,10 @@ def walk_disk(path):
                 yield from walk_disk(entry.path)
 
 
-def check_target(path, scan, recursive, trash):
-    """Check that path may be removed. Return (records, verified) or raise Refuse."""
+def check_target(path, scan, recursive, trash, progress=None):
+    """Check that path may be removed. Return (records, verified) or raise Refuse.
+
+    progress(phase, done, count, got, total) is called while the disk is read and compared."""
     if path.count("/") <= 1:
         raise Refuse(_("top-level path (/, /etc, /var...): refused on principle"))
     if path == normalize(os.path.expanduser("~")):
@@ -375,16 +390,32 @@ def check_target(path, scan, recursive, trash):
             if st.st_size != info.get("asize", 0):
                 raise Refuse(_("size differs from the scan"))
 
+    expect_n, expect_b = subtree_totals(node) if node is not None else (0, 0)
+    if progress:
+        progress("read", 0, expect_n, 0, expect_b)
+    entries = []
+    got = 0
     try:
-        entries = list(walk_disk(path))
+        for item in walk_disk(path):
+            entries.append(item)
+            if not stat.S_ISDIR(item[1].st_mode):
+                got += item[1].st_size
+            if progress and len(entries) % 64 == 0:
+                progress("read", len(entries), expect_n, got, expect_b)
     except OSError as e:
         raise Refuse(_("unreadable ({err})").format(err=e.strerror))
+    if progress:
+        progress("read", len(entries), expect_n, got, expect_b)
     if is_dir and len(entries) > 1 and not recursive:
         raise Refuse(_("directory is not empty: add -r"))
 
     if is_dir and node is not None:
+        if progress:
+            progress("compare", 0, len(entries), got, expect_b)
         known = subtree_meta(node, path, {})
-        for p, s in entries:
+        for index, (p, s) in enumerate(entries, 1):
+            if progress and index % 256 == 0:
+                progress("compare", index, len(entries), got, expect_b)
             if p not in known:
                 raise Refuse(_("created since the scan: {path}").format(path=p))
             info, _isdir = known[p]
@@ -400,6 +431,162 @@ def check_target(path, scan, recursive, trash):
 
 
 # --- removal (shared by `rm` and the interactive browser) ----------------------
+
+_SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+class ShellSpin:
+    """One updating line on a terminal. Silent when stdout is not a terminal."""
+
+    def __init__(self):
+        self.text = ""
+        self.stop = threading.Event()
+        self.thread = None
+        self.started = time.monotonic()
+
+    def start(self, text):
+        self.clear()
+        self.text = text
+        self.started = time.monotonic()
+        if not sys.stdout.isatty():
+            return
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def update(self, text):
+        self.text = text
+
+    def _loop(self):
+        i = 0
+        while not self.stop.is_set():
+            i += 1
+            elapsed = int(time.monotonic() - self.started)
+            frame = _SPIN[i % len(_SPIN)]
+            width = shutil.get_terminal_size((80, 24)).columns
+            line = f"{frame} {self.text}  {elapsed}s"
+            if len(line) >= width:
+                line = line[:max(width - 1, 1)]
+            print("\r" + line + "\033[K", end="", flush=True)
+            self.stop.wait(0.08)
+
+    def clear(self):
+        self.stop.set()
+        thread = self.thread
+        self.thread = None
+        if thread is not None:
+            thread.join()
+        if sys.stdout.isatty():
+            print("\r\033[K", end="", flush=True)
+
+
+class StatusBoard:
+    """Several live lines, drawn from the thread that owns the terminal."""
+
+    def __init__(self):
+        self.rows = {}
+        self.order = []
+        self.started = {}
+        self.lines = 0
+        self.frame = 0
+        self.lock = threading.Lock()
+
+    def set(self, key, text):
+        with self.lock:
+            if key not in self.rows:
+                self.order.append(key)
+                self.started[key] = time.monotonic()
+            self.rows[key] = text
+
+    def drop(self, key):
+        with self.lock:
+            self.rows.pop(key, None)
+            self.started.pop(key, None)
+            if key in self.order:
+                self.order.remove(key)
+
+    def paint(self):
+        if not sys.stdout.isatty():
+            return
+        with self.lock:
+            rows = [(self.rows[key], self.started.get(key, time.monotonic()))
+                    for key in self.order if key in self.rows]
+        self.frame += 1
+        frame = _SPIN[self.frame % len(_SPIN)]
+        width = shutil.get_terminal_size((80, 24)).columns
+        now = time.monotonic()
+        lines = []
+        for text, started in rows:
+            line = f"{frame} {text}  {int(now - started)}s"
+            if len(line) >= width:
+                line = line[:max(width - 1, 1)]
+            lines.append(line)
+        if self.lines:
+            sys.stdout.write(f"\033[{self.lines}A")
+        for line in lines:
+            sys.stdout.write("\r" + line + "\033[K\n")
+        extra = self.lines - len(lines)
+        for _ in range(max(extra, 0)):
+            sys.stdout.write("\r\033[K\n")
+        if extra > 0:
+            sys.stdout.write(f"\033[{extra}A")
+        self.lines = len(lines)
+        sys.stdout.flush()
+
+    def clear(self):
+        if self.lines and sys.stdout.isatty():
+            sys.stdout.write(f"\033[{self.lines}A")
+            for i in range(self.lines):
+                sys.stdout.write("\r\033[K")
+                if i != self.lines - 1:
+                    sys.stdout.write("\n")
+            if self.lines > 1:
+                sys.stdout.write(f"\033[{self.lines - 1}A")
+            sys.stdout.flush()
+        self.lines = 0
+
+
+class JobSink:
+    """Live lines for a curses screen. Nothing is written to the terminal."""
+
+    def __init__(self):
+        self.rows = {}
+        self.order = []
+        self.started = {}
+        self.log = []
+        self.lock = threading.Lock()
+
+    def set(self, key, text):
+        with self.lock:
+            if key not in self.rows:
+                self.order.append(key)
+                self.started[key] = time.monotonic()
+            self.rows[key] = text
+
+    def drop(self, key):
+        with self.lock:
+            self.rows.pop(key, None)
+            self.started.pop(key, None)
+            if key in self.order:
+                self.order.remove(key)
+
+    def add_log(self, line):
+        with self.lock:
+            self.log.append(line)
+
+    def snapshot(self):
+        with self.lock:
+            now = time.monotonic()
+            live = [(self.rows[key], int(now - self.started.get(key, now)))
+                    for key in self.order if key in self.rows]
+            return live, list(self.log)
+
+    def paint(self):
+        return
+
+    def clear(self):
+        return
+
 
 def copy_tree(src, dst, progress):
     """Copy src to dst file by file, then remove src. progress sees each step."""
@@ -469,6 +656,26 @@ def move_path(src, dst, progress):
         copy_tree(src, dst, progress)
 
 
+def delete_records(recs, progress):
+    """Remove every record, children first. progress(done, count, got, total) sees each one."""
+    count = len(recs)
+    total_b = sum(r["size"] for r in recs if r["type"] != "dir")
+    done = 0
+    got = 0
+    for rec in reversed(recs):
+        try:
+            if rec["type"] == "dir":
+                os.rmdir(rec["path"])
+            else:
+                os.unlink(rec["path"])
+                got += rec["size"]
+        except FileNotFoundError:
+            if rec["type"] != "dir":
+                got += rec["size"]
+        done += 1
+        progress(done, count, got, total_b)
+
+
 def journal_sync(logfh, log_path):
     """Flush the journal file and its directory before any removal."""
     logfh.flush()
@@ -481,7 +688,7 @@ def journal_sync(logfh, log_path):
         os.close(fd)
 
 
-def run_removal(paths, scan, recursive, trash, yes, log_path, hint=True):
+def run_removal(paths, scan, recursive, trash, yes, log_path, hint=True, sink=None):
     """Check, then simulate (yes=False) or delete / quarantine (yes=True).
 
     The journal entry is synced before the removal. Prints everything.
@@ -505,72 +712,106 @@ def run_removal(paths, scan, recursive, trash, yes, log_path, hint=True):
                     "trash_dir": os.path.join(trash, run)}, ensure_ascii=False) + "\n")
             journal_sync(logfh, log_path)
         except OSError as e:
-            print(_("ncdu-clean: journal not writable ({path}: {err}). Nothing was deleted.")
-                  .format(path=log_path, err=e.strerror), file=sys.stderr)
+            line = _("ncdu-clean: journal not writable ({path}: {err}). Nothing was deleted.") \
+                .format(path=log_path, err=e.strerror)
+            if sink is not None:
+                sink.add_log(line)
+            else:
+                print(line, file=sys.stderr)
             return 2, []
 
     ok = refused = failed = 0
     total = 0
     gone_paths = []
-    painted = {"on": False, "at": 0.0}
+    board = sink if sink is not None else StatusBoard()
 
-    def _move_progress(done_n, count, done_b, total_b, name):
-        now = time.monotonic()
-        if done_n < count and now - painted["at"] < 0.15:
-            return
-        painted["at"] = now
-        painted["on"] = True
-        width = shutil.get_terminal_size((80, 24)).columns
-        line = _("  {done}/{count} files   {got} / {size}   {name}").format(
-            done=done_n, count=count, got=human(done_b), size=human(total_b), name=name)
-        shown = line[:max(width - 1, 1)]
-        if sys.stdout.isatty():
-            print("\r" + shown.ljust(max(width - 1, 1)), end="", flush=True)
+    def report(line, err=False):
+        if sink is not None:
+            sink.add_log(line)
+        elif err:
+            print(line, file=sys.stderr)
         else:
-            print(shown, flush=True)
+            print(line)
+    journal_lock = threading.Lock()
 
-    for index, path in enumerate(paths, 1):
+    def show(key, text):
+        board.set(key, text)
+
+    def handle(path):
+        """Check one path, then delete or move it. The terminal is updated elsewhere."""
+        def on_check(phase, done, count, got, total_b, path=path):
+            if phase == "read" and dry:
+                pattern = _("Simulating {path}  {done}/{count}  {got}/{size}")
+            elif phase == "read":
+                pattern = _("Reading {path}  {done}/{count}  {got}/{size}")
+            else:
+                pattern = _("Comparing {path} with the export  {done}/{count}")
+            show(path, pattern.format(
+                path=path, done=done, count=count, got=human(got), size=human(total_b)))
+
+        if dry:
+            show(path, _("Simulating {path}  {done}/{count}  {got}/{size}").format(
+                path=path, done=0, count=0, got=human(0), size=human(0)))
+        else:
+            show(path, _("Reading {path}  {done}/{count}  {got}/{size}").format(
+                path=path, done=0, count=0, got=human(0), size=human(0)))
         try:
-            recs, verified = check_target(path, scan, recursive, trash)
+            recs, verified = check_target(path, scan, recursive, trash, progress=on_check)
         except Refuse as r:
-            print(_("REFUSED      {path}: {why}").format(path=path, why=r), file=sys.stderr)
-            refused += 1
-            continue
+            return {"path": path, "refused": str(r)}
         files = [r for r in recs if r["type"] != "dir"]
         size = sum(r["size"] for r in files)
         label = "({files}, {size})".format(files=fmt_files(len(files)), size=human(size))
         if dry:
-            print(_("[simulation] {path}  {label}").format(path=path, label=label))
-            ok += 1
-            total += size
-            continue
+            return {"path": path, "sim": True, "label": label, "size": size}
 
         ts = now_iso()
         action = "trash" if trash else "delete"
+        show(path, _("Writing the journal  {files}").format(files=fmt_files(0)))
         try:
-            for r in recs:
-                logfh.write(json.dumps({"ts": ts, "run": run, "user": user,
-                                        "action": action, **r,
-                                        "verified": verified}, ensure_ascii=False) + "\n")
-            journal_sync(logfh, log_path)
+            with journal_lock:
+                for written, r in enumerate(recs, 1):
+                    logfh.write(json.dumps({"ts": ts, "run": run, "user": user,
+                                            "action": action, **r,
+                                            "verified": verified}, ensure_ascii=False) + "\n")
+                    if written % 200 == 0:
+                        show(path, _("Writing the journal  {files}").format(
+                            files=fmt_files(written)))
+                show(path, _("Saving the journal"))
+                journal_sync(logfh, log_path)
         except OSError as e:
-            print(_("FAILED       {path}: {why} ({gone}/{count} items gone)").format(
-                path=path, why=e.strerror, gone=0, count=len(recs)), file=sys.stderr)
-            failed += 1
-            continue
+            return {"path": path, "journal_error": e.strerror, "count": len(recs)}
 
         err = None
         try:
             if trash:
                 dest = os.path.join(trash, run, path.lstrip("/"))
-                print(_("Moving {n}/{total}  {path}").format(
-                    n=index, total=len(paths), path=path), flush=True)
-                move_path(path, dest, _move_progress)
-                if painted["on"]:
-                    print()
-                    painted["on"] = False
+                file_n = len(files)
+                total_b = size
+
+                def tick(done, count, got, total_b, _name, path=path):
+                    if done != count and done % 32:
+                        return
+                    show(path, _("Moving {path}  {done}/{count}  {got}/{size}").format(
+                        path=path, done=done, count=count,
+                        got=human(got), size=human(total_b)))
+
+                show(path, _("Moving {path}  {done}/{count}  {got}/{size}").format(
+                    path=path, done=0, count=file_n, got=human(0), size=human(total_b)))
+                move_path(path, dest, tick)
+            elif recs[0]["type"] == "dir" and len(recs) > 1:
+                def tick(done, count, got, total_b, path=path):
+                    if done != count and done % 32:
+                        return
+                    show(path, _("Deleting {path}  {done}/{count}  {got}/{size}").format(
+                        path=path, done=done, count=count,
+                        got=human(got), size=human(total_b)))
+
+                show(path, _("Deleting {path}  {done}/{count}  {got}/{size}").format(
+                    path=path, done=0, count=len(recs), got=human(0), size=human(size)))
+                delete_records(recs, tick)
             elif recs[0]["type"] == "dir":
-                shutil.rmtree(path) if len(recs) > 1 else os.rmdir(path)
+                os.rmdir(path)
             else:
                 os.unlink(path)
         except OSError as e:
@@ -580,42 +821,106 @@ def run_removal(paths, scan, recursive, trash, yes, log_path, hint=True):
         stayed = [r for r in recs if os.path.lexists(r["path"])]
         if stayed:
             ts = now_iso()
-            for r in stayed:
-                logfh.write(json.dumps({"ts": ts, "run": run, "user": user,
-                                        "action": "aborted", **r,
-                                        "verified": verified}, ensure_ascii=False) + "\n")
-            try:
-                journal_sync(logfh, log_path)
-            except OSError:
-                pass
-        gone_paths += [r["path"] for r in gone]
+            with journal_lock:
+                for r in stayed:
+                    logfh.write(json.dumps({"ts": ts, "run": run, "user": user,
+                                            "action": "aborted", **r,
+                                            "verified": verified}, ensure_ascii=False) + "\n")
+                try:
+                    journal_sync(logfh, log_path)
+                except OSError:
+                    pass
+        return {"path": path, "label": label, "size": size, "err": err,
+                "gone": gone, "count": len(recs)}
 
-        if err or len(gone) < len(recs):
-            print(_("FAILED       {path}: {why} ({gone}/{count} items gone)").format(
+    def emit(result):
+        nonlocal ok, refused, failed, total
+        path = result["path"]
+        if result.get("refused"):
+            report(_("REFUSED      {path}: {why}").format(path=path, why=result["refused"]), err=True)
+            refused += 1
+            return
+        if result.get("journal_error"):
+            report(_("FAILED       {path}: {why} ({gone}/{count} items gone)").format(
+                path=path, why=result["journal_error"], gone=0, count=result["count"]), err=True)
+            failed += 1
+            return
+        if result.get("sim"):
+            report(_("[simulation] {path}  {label}").format(path=path, label=result["label"]))
+            ok += 1
+            total += result["size"]
+            return
+        gone = result["gone"]
+        err = result.get("err")
+        gone_paths.extend(r["path"] for r in gone)
+        if err or len(gone) < result["count"]:
+            report(_("FAILED       {path}: {why} ({gone}/{count} items gone)").format(
                 path=path, why=err.strerror if err else _("partial removal"),
-                gone=len(gone), count=len(recs)), file=sys.stderr)
+                gone=len(gone), count=result["count"]), err=True)
             failed += 1
         else:
             word = _("QUARANTINED") if trash else _("DELETED")
-            print(f"{word:<12} {path}  {label}")
+            report(f"{word:<12} {path}  {result['label']}")
             ok += 1
-            total += size
+            total += result["size"]
+
+    try:
+        if sink is None and not sys.stdout.isatty():
+            for path in paths:
+                emit(handle(path))
+        else:
+            # Deletes run two at a time. A move stays alone: one disk, one writer.
+            width = 1 if trash and not dry else 2
+            waiting = list(paths)
+            active = {}
+            finished = []
+            lock = threading.Lock()
+
+            def run(path):
+                try:
+                    result = handle(path)
+                except Exception as exc:
+                    result = {"path": path, "refused": str(exc)}
+                with lock:
+                    finished.append(result)
+
+            while waiting or active:
+                while waiting and len(active) < width:
+                    path = waiting.pop(0)
+                    worker = threading.Thread(target=run, args=(path,), daemon=True)
+                    active[path] = worker
+                    worker.start()
+                board.paint()
+                time.sleep(0.08)
+                with lock:
+                    ready = finished[:]
+                    finished.clear()
+                if not ready:
+                    continue
+                for result in ready:
+                    active.pop(result["path"], None)
+                    board.drop(result["path"])
+                board.clear()
+                for result in ready:
+                    emit(result)
+    finally:
+        board.clear()
 
     if dry:
         verb = _("to delete")
     else:
         verb = _("quarantined") if trash else _("deleted")
-    print("\n" + _("{paths} {verb} ({size}), {refused} refused, {failed} failed.").format(
+    report("\n" + _("{paths} {verb} ({size}), {refused} refused, {failed} failed.").format(
         paths=fmt_paths(ok), verb=verb, size=human(total), refused=refused, failed=failed))
     if dry:
         if hint:
-            print(_("Simulation only: add --yes to act."))
+            report(_("Simulation only: add --yes to act."))
     else:
         logfh.close()
-        print(_("Journal: {path}").format(path=log_path))
+        report(_("Journal: {path}").format(path=log_path))
         if trash:
-            print(_("Quarantine: {path}  (restore with: ncdu-clean restore {run})")
-                  .format(path=os.path.join(trash, run), run=run))
+            report(_("Quarantine: {path}  (restore with: ncdu-clean restore {run})")
+                   .format(path=os.path.join(trash, run), run=run))
     return (1 if (refused or failed) else 0), gone_paths
 
 
@@ -663,7 +968,9 @@ def top_level(paths):
     """Keep only the paths that have no ancestor in the collection."""
     known = set(paths)
     out = []
-    for p in paths:
+    for n, p in enumerate(paths, 1):
+        if n % 4096 == 0:
+            time.sleep(0)
         q = os.path.dirname(p)
         while q not in ("", "/") and q not in known:
             q = os.path.dirname(q)
@@ -1124,12 +1431,15 @@ def build_payload(root, cancel=None, disks=None, progress=None):
         extra = path[len(root_path):].strip("/")
         return 0 if not extra else extra.count("/") + 1
 
+    root_here = os.path.lexists(root_path)
     chosen, seen = [], set()
     for level in (1, 2, 3, 4):
         level_rows = [rec for rec in candidates if depth_of(rec["path"]) == level]
         level_rows.sort(key=lambda rec: rec["size"], reverse=True)
         for rec in level_rows:
             if rec["path"] in seen or suggestion_block(rec["path"]):
+                continue
+            if root_here and not os.path.lexists(rec["path"]):
                 continue
             chosen.append(rec)
             seen.add(rec["path"])
@@ -1142,6 +1452,8 @@ def build_payload(root, cancel=None, disks=None, progress=None):
         files.sort(key=lambda rec: rec["size"], reverse=True)
         for rec in files:
             if rec["path"] in seen:
+                continue
+            if root_here and not os.path.lexists(rec["path"]):
                 continue
             chosen.append(rec)
             seen.add(rec["path"])
@@ -1494,6 +1806,7 @@ def filter_plan(plan, index, root):
         raise SuggestError(_("suggestion must be a JSON object with an \"items\" list"))
     root_path = normalize(info_of(root)["name"])
     home = normalize(os.path.expanduser("~"))
+    root_here = os.path.lexists(root_path)
     by_path = {}
     dropped = []
     for raw in plan["items"]:
@@ -1515,6 +1828,9 @@ def filter_plan(plan, index, root):
             continue
         if path not in index:
             _drop(dropped, path, _("not in the export (created since the scan, or outside it)"))
+            continue
+        if root_here and not os.path.lexists(path):
+            _drop(dropped, path, _("no longer on the disk"))
             continue
         if path.count("/") <= 1:
             _drop(dropped, path, _("top-level path (/, /etc, /var...): refused on principle"))
@@ -1921,9 +2237,9 @@ class Browser:
         self.disk = self.app = None
         self.hard_quit = False
 
-    def recompute(self):
+    def recompute(self, progress=None):
         self.disk, self.app = {}, {}
-        compute_sizes(self.root, self.disk, self.app)
+        compute_sizes(self.root, self.disk, self.app, progress=progress)
 
     @property
     def sizes(self):
@@ -2013,12 +2329,35 @@ class Browser:
         self.stack, self.parts = stack, parts
         self.saved_pos = self.saved_pos[:len(stack) - 1]
 
-    def after_removal(self, gone):
-        for p in sorted(gone, key=len, reverse=True):
-            self.remove_node(p)
+    def after_removal(self, gone, sink=None):
+        spin = None if sink is not None else ShellSpin()
+
+        def show(text):
+            if sink is not None:
+                sink.set("after", text)
+            else:
+                spin.update(text)
+
+        if spin is not None:
+            spin.start(_("Updating the list  {done}/{count}").format(done=0, count=len(gone)))
+        else:
+            show(_("Updating the list  {done}/{count}").format(done=0, count=len(gone)))
+        tops = top_level(gone)
+        for done, path in enumerate(tops, 1):
+            self.remove_node(path)
+            show(_("Updating the list  {done}/{count}").format(done=done, count=len(tops)))
         for p in [p for p in self.marked if find(self.root, p) is None]:
             del self.marked[p]
-        self.recompute()
+        if spin is not None:
+            spin.start(_("Recounting sizes  {n} items").format(n=0))
+        else:
+            show(_("Recounting sizes  {n} items").format(n=0))
+        self.recompute(progress=lambda n: show(
+            _("Recounting sizes  {n} items").format(n=n)))
+        if spin is not None:
+            spin.clear()
+        elif sink is not None:
+            sink.drop("after")
         self.restore_view()
         self.save()
 
@@ -2362,43 +2701,122 @@ class Browser:
                 self.msg = lines[0] if lines else ""
                 return
 
+    def _job_screen(self, scr, sink, footer, frame):
+        """The work stays on this screen: live lines above, finished lines below."""
+        import curses
+        try:
+            live, done = sink.snapshot()
+            h, w = scr.getmaxyx()
+            scr.erase()
+            if h < 8 or w < 40:
+                scr.addnstr(0, 0, _("Terminal too small"), max(w - 1, 1))
+                scr.refresh()
+                return
+            scr.addnstr(0, 0, (_(" ncdu-clean · suggestion") + " · " + self.scan_name).ljust(w - 1),
+                        w - 1, curses.A_REVERSE)
+            scr.addnstr(2, 0, _(" In progress").ljust(w - 1), w - 1, curses.A_BOLD)
+            y = 3
+            spin = _SPIN[frame % len(_SPIN)]
+            shown = live[:max((h - 6) // 2, 1)]
+            if not shown:
+                scr.addnstr(y, 0, " " + _("waiting"), w - 1)
+                y += 1
+            for text, elapsed in shown:
+                if y >= h - 3:
+                    break
+                scr.addnstr(y, 0, self._fit(f"  {spin} {text}  {elapsed}s", w - 1).ljust(w - 1), w - 1)
+                y += 1
+                match = re.search(r"(\d+)/(\d+)", text)
+                if match and y < h - 3:
+                    done_n, count = int(match.group(1)), int(match.group(2))
+                    width = min(24, max(w - 6, 4))
+                    fill = int(width * done_n / count) if count else 0
+                    bar = "  [" + "#" * fill + " " * (width - fill) + "]"
+                    scr.addnstr(y, 0, bar.ljust(w - 1), w - 1)
+                    y += 1
+            if y < h - 3:
+                y += 1
+                scr.addnstr(y, 0, _(" Finished").ljust(w - 1), w - 1, curses.A_BOLD)
+                y += 1
+                room = max(h - 2 - y, 0)
+                for line in done[-room:]:
+                    scr.addnstr(y, 0, self._fit("  " + line, w - 1).ljust(w - 1), w - 1)
+                    y += 1
+            scr.addnstr(h - 1, 0, self._fit(" " + footer, w - 1).ljust(w - 1), w - 1)
+            scr.refresh()
+        except curses.error:
+            pass
+
+    def _drive_job(self, scr, sink, work, footer):
+        """Run work on a thread and keep drawing the screen."""
+        import curses
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        frame = 0
+        scr.nodelay(True)
+        try:
+            while worker.is_alive():
+                frame += 1
+                self._job_screen(scr, sink, footer, frame)
+                if scr.getch() in (ord("q"), 27):
+                    quit_now()
+                time.sleep(0.05)
+        finally:
+            scr.nodelay(False)
+        worker.join()
+
     def run_suggested(self, scr, rows, trash):
-        """Leave the screen, show the simulation, and act only after yes. Return True if they confirmed."""
+        """Simulate, ask, then act, all on this screen. Return True if they confirmed."""
         import curses
         paths = [row["path"] for row in rows]
-        curses.def_prog_mode()
-        curses.endwin()
-        acted = False
-        try:
-            print()
-            actions = {row.get("action") for row in rows}
-            if trash and actions == {"delete"}:
-                print(_("These paths were suggested for deletion. They will be moved instead."))
-            elif not trash and actions == {"quarantine"}:
-                print(_("These paths were suggested for quarantine. They will be deleted instead."))
-            run_removal(paths, self.root, True, trash, False, self.log_path, hint=False)
-            if trash:
-                print(_("Quarantine folder: {path}").format(path=trash))
-                if not os.path.isdir(trash):
-                    print(_("This folder will be created. The original paths are kept inside it."))
-                else:
-                    print(_("The original paths are kept inside this folder."))
-            answer = input((_("Quarantine {paths}? Type \"{yes}\": ") if trash
-                            else _("Delete {paths} permanently? Type \"{yes}\": "))
-                           .format(paths=fmt_paths(len(paths)), yes=_("yes"))).strip().lower()
-            if answer in (_("yes").lower(), "yes"):
-                _rc, gone = run_removal(paths, self.root, True, trash, True, self.log_path)
+        sink = JobSink()
+        actions = {row.get("action") for row in rows}
+        if trash and actions == {"delete"}:
+            sink.add_log(_("These paths were suggested for deletion. They will be moved instead."))
+        elif not trash and actions == {"quarantine"}:
+            sink.add_log(_("These paths were suggested for quarantine. They will be deleted instead."))
+        holder = {}
+
+        def simulate():
+            try:
+                holder["out"] = run_removal(
+                    paths, self.root, True, trash, False, self.log_path, hint=False, sink=sink)
+            except Exception as exc:
+                holder["err"] = exc
+
+        self._drive_job(scr, sink, simulate, _("Simulation. q quits"))
+        if trash:
+            sink.add_log(_("Quarantine folder: {path}").format(path=trash))
+        typed = ""
+        prompt = _("Type {yes} to continue").format(yes=_("yes"))
+        while True:
+            self._job_screen(scr, sink, f"{prompt}  {typed}", 0)
+            k = scr.getch()
+            if k in (ord("q"), 27):
+                self.msg = _("Cancelled.")
+                return False
+            if k in (curses.KEY_BACKSPACE, 127, 8):
+                typed = typed[:-1]
+            elif k in (10, 13, curses.KEY_ENTER):
+                break
+            elif isinstance(k, int) and 32 <= k < 127:
+                typed += chr(k)
+        if typed.strip().lower() not in (_("yes").lower(), "yes"):
+            self.msg = _("Cancelled.")
+            return False
+
+        def act():
+            try:
+                holder["out"] = run_removal(
+                    paths, self.root, True, trash, True, self.log_path, sink=sink)
+                gone = holder["out"][1] if holder.get("out") else []
                 if gone:
-                    self.after_removal(gone)
-                acted = True
-            else:
-                print(_("Cancelled."))
-            input("\n" + _("Press Enter to go back to the browser..."))
-        except (EOFError, KeyboardInterrupt):
-            print()
-        scr.clear()
-        scr.refresh()
-        return acted
+                    self.after_removal(gone, sink=sink)
+            except Exception as exc:
+                holder["err"] = exc
+
+        self._drive_job(scr, sink, act, _("q quits"))
+        return True
 
     def plan_help_lines(self):
         return [

@@ -45,9 +45,22 @@ PROMPT = (
     "The program keeps the original paths inside that one folder. "
     "Never suggest a user profile, pagefile.sys, swapfile.sys, hiberfil.sys, "
     "or the Windows, System32, SysWOW64 or WinSxS directories. "
-    "Those break the system. One short reason, a single line. "
-    "The answer itself is only that JSON object."
+    "Those break the system. One short reason, a single line."
 )
+
+THINK_PROMPT = (
+    PROMPT.replace(
+        "Reply with JSON only, no markdown, in this shape: ",
+        "The JSON object has this shape: ",
+    )
+    + " Write at most 12 short lines. Name the chosen paths and the action. "
+    "Copy every path exactly from the items list. "
+    "Then write a line that contains only DONE. "
+    "Then write the JSON object and nothing else. "
+    "Do not discuss these instructions."
+)
+
+PROMPT += " The answer itself is only that JSON object."
 
 
 def fail(msg):
@@ -220,6 +233,81 @@ def post(url, key, body_obj, on_content):
         fail(f"suggestion endpoint unreachable: {e.reason}")
 
 
+def signal_think_done(started):
+    elapsed = 0 if started is None else time.monotonic() - started
+    sys.stderr.write(f"THINK_DONE\t{elapsed:.3f}\n")
+    sys.stderr.flush()
+
+
+def think_and_answer(url, key, model, summary):
+    """One request. The essay and the JSON share that context.
+
+    Lines before a line that is only DONE are the reasoning. The rest is the plan.
+    16000 is a ceiling: the server stops when the model stops."""
+    state = {"held": "", "passed": False, "answer": [], "started": None}
+
+    def on_content(piece):
+        if state["started"] is None:
+            state["started"] = time.monotonic()
+        if state["passed"]:
+            state["answer"].append(piece)
+            emit(piece)
+            return
+        if not state["held"].strip() and piece.lstrip().startswith("{"):
+            state["passed"] = True
+            signal_think_done(state["started"])
+            state["answer"].append(piece)
+            emit(piece)
+            return
+        state["held"] += piece
+        while "\n" in state["held"] and not state["passed"]:
+            line, state["held"] = state["held"].split("\n", 1)
+            if line.strip() == "DONE":
+                state["passed"] = True
+                signal_think_done(state["started"])
+                if state["held"]:
+                    state["answer"].append(state["held"])
+                    emit(state["held"])
+                    state["held"] = ""
+                return
+            emit_think(line + "\n")
+
+    text = post(url, key, {
+        "model": model,
+        "max_tokens": 16000,
+        "stream": True,
+        "messages": [
+            {"role": "system", "content": THINK_PROMPT},
+            {"role": "user", "content": summary},
+        ],
+    }, on_content) or ""
+    if state["passed"]:
+        return "".join(state["answer"]), True
+    rest = state["held"]
+    if rest.strip() == "DONE":
+        signal_think_done(state["started"])
+        return "", False
+    if rest:
+        emit_think(rest)
+    if state["started"] is not None:
+        signal_think_done(state["started"])
+    return text, False
+
+
+def json_only(url, key, model, summary):
+    """One short call that writes the plan, used when the reasoning never reached it."""
+    return post(url, key, {
+        "model": model,
+        "max_tokens": 1200,
+        "stream": True,
+        "reasoning_effort": "none",
+        "messages": [
+            {"role": "system", "content": PROMPT},
+            {"role": "user", "content": summary},
+        ],
+    }, emit) or ""
+
+
 def main():
     url = os.environ.get("NCDU_CLEAN_AI_URL", "").strip()
     model = os.environ.get("NCDU_CLEAN_AI_MODEL", "").strip()
@@ -230,47 +318,19 @@ def main():
     if not summary.strip():
         fail("empty summary")
     thinking = os.environ.get("NCDU_CLEAN_AI_THINK", "").strip() == "1"
-    essay = ""
     if thinking:
-        started = None
-
-        def keep(piece):
-            nonlocal started
-            if started is None:
-                started = time.monotonic()
-            emit_think(piece)
-
-        essay = post(url, key, {
-            "model": model,
-            "max_tokens": 4000,
-            "stream": True,
-            "messages": [
-                {"role": "system", "content": PROMPT + (
-                    " Think privately. End with a line that contains only DONE."
-                    " Do not write the JSON object in this step.")},
-                {"role": "user", "content": summary},
-            ],
-        }, keep) or ""
-        elapsed = 0 if started is None else time.monotonic() - started
-        sys.stderr.write(f"THINK_DONE\t{elapsed:.3f}\n")
-        sys.stderr.flush()
-    messages = [
-        {"role": "system", "content": PROMPT},
-        {"role": "user", "content": summary},
-    ]
-    if essay:
-        messages.append({"role": "assistant", "content": essay[-12000:]})
-        messages.append({"role": "user", "content":
-                         "The reasoning is finished. Reply with the JSON object only. "
-                         "Quarantine the largest items that fit in the removable disk's "
-                         "free space, including whole programs. Do not return only the small caches."})
-    text = post(url, key, {
-        "model": model,
-        "max_tokens": 1200,
-        "stream": True,
-        "reasoning_effort": "none",
-        "messages": messages,
-    }, emit)
+        text, emitted = think_and_answer(url, key, model, summary)
+        try:
+            plan = extract_json(text)
+        except (UnicodeError, json.JSONDecodeError, ValueError):
+            plan = None
+        if plan is None:
+            text = json_only(url, key, model, summary)
+        elif not emitted:
+            text = json.dumps(plan, ensure_ascii=False)
+            emit(text)
+    else:
+        text = json_only(url, key, model, summary)
     try:
         extract_json(text)
     except (UnicodeError, json.JSONDecodeError, ValueError) as e:

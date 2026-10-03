@@ -55,8 +55,9 @@ In the browser, `p` opens the same plan. F1 lists its keys.
 (Ollama, Grok, Gemini, and others). It reads `NCDU_CLEAN_AI_URL`,
 `NCDU_CLEAN_AI_MODEL` and, when the endpoint requires one, `NCDU_CLEAN_AI_KEY`.
 The key is sent only to that endpoint. `NCDU_CLEAN_AI_THINK=1` asks the model
-to think first, on its own. The wait screen shows how long that took, then the
-JSON plan. The thinking text stays in `~/.local/state/ncdu-clean/suggest.log`.
+to think in the same reply, then write the JSON plan. The wait screen shows how
+long the thinking took. The thinking text stays in
+`~/.local/state/ncdu-clean/suggest.log`.
 
 Translations live in `po/` (gettext). `make` builds them, `make pot` refreshes the template.
 

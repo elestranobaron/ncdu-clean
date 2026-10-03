@@ -18,6 +18,8 @@ Depends:
  ${python3:Depends},
 Recommends:
  ncdu,
+Suggests:
+ ansible-temple,
 Description: delete files found with ncdu, with a journal and an undo
  ncdu-clean works on an export made by ncdu. It lets you browse the export in
  a terminal, mark files and directories, and then choose what to do with the

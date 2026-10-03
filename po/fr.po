@@ -123,6 +123,9 @@ msgstr "c'est la racine du scan"
 msgid "not in the export (created since the scan, or outside it)"
 msgstr "absent de l'export (créé depuis le scan, ou hors du scan)"
 
+msgid "no longer on the disk"
+msgstr "n'est plus sur le disque"
+
 #: ncdu-clean:340
 msgid "the type changed since the scan"
 msgstr "le type a changé depuis le scan"
@@ -1280,3 +1283,57 @@ msgstr "Dossier"
 
 msgid "Writing the plan."
 msgstr "Écriture du plan."
+
+#, python-brace-format
+msgid "Simulating {path}  {done}/{count}  {got}/{size}"
+msgstr "Simulation de {path}  {done}/{count}  {got}/{size}"
+
+#, python-brace-format
+msgid "Reading {path}  {done}/{count}  {got}/{size}"
+msgstr "Lecture de {path}  {done}/{count}  {got}/{size}"
+
+#, python-brace-format
+msgid "Comparing {path} with the export  {done}/{count}"
+msgstr "Comparaison de {path} avec l'export  {done}/{count}"
+
+#, python-brace-format
+msgid "Writing the journal  {files}"
+msgstr "Écriture du journal  {files}"
+
+msgid "Saving the journal"
+msgstr "Enregistrement du journal"
+
+#, python-brace-format
+msgid "Deleting {path}  {done}/{count}  {got}/{size}"
+msgstr "Suppression de {path}  {done}/{count}  {got}/{size}"
+
+#, python-brace-format
+msgid "Moving {path}  {done}/{count}  {got}/{size}"
+msgstr "Déplacement de {path}  {done}/{count}  {got}/{size}"
+
+msgid "In progress"
+msgstr "En cours"
+
+msgid "Finished"
+msgstr "Terminé"
+
+msgid "waiting"
+msgstr "en attente"
+
+msgid "Simulation. q quits"
+msgstr "Simulation. q quitte"
+
+msgid "q quits"
+msgstr "q quitte"
+
+#, python-brace-format
+msgid "Type {yes} to continue"
+msgstr "Tape {yes} pour continuer"
+
+#, python-brace-format
+msgid "Updating the list  {done}/{count}"
+msgstr "Mise à jour de la liste  {done}/{count}"
+
+#, python-brace-format
+msgid "Recounting sizes  {n} items"
+msgstr "Recalcul des tailles  {n} éléments"
