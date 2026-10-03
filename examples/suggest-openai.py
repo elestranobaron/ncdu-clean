@@ -53,10 +53,13 @@ THINK_PROMPT = (
         "Reply with JSON only, no markdown, in this shape: ",
         "The JSON object has this shape: ",
     )
-    + " Write at most 12 short lines. Name the chosen paths and the action. "
+    + " Write at most 12 short lines, then a line that contains only DONE, "
+    "then the JSON object and nothing else. "
+    "Those lines are a sketch. The items array lists every chosen path, "
+    "including paths that were not in the 12 lines. "
+    "Keep the large items until the quarantined size is close to the free "
+    "space on the removable disk. "
     "Copy every path exactly from the items list. "
-    "Then write a line that contains only DONE. "
-    "Then write the JSON object and nothing else. "
     "Do not discuss these instructions."
 )
 

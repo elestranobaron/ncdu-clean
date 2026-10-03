@@ -1168,8 +1168,8 @@ msgstr "Disque amovible."
 msgid "Plan ready."
 msgstr "Plan prêt."
 
-msgid " arrows    F1 help    q quits"
-msgstr " flèches    F1 aide    q quitte"
+msgid " arrows    a inside    n next    F1 help    q quits"
+msgstr " flèches    a dedans    n suivant    F1 aide    q quitte"
 
 msgid "Plan"
 msgstr "Plan"
@@ -1189,8 +1189,17 @@ msgstr "  t                passer la ligne choisie de Delete à Quarantine,"
 msgid "                   or from Quarantine to Delete"
 msgstr "                   ou de Quarantine à Delete"
 
-msgid "  -                take the selected line out of the plan"
-msgstr "  -                retirer la ligne choisie du plan"
+msgid "  -                take the selected line out of the plan,"
+msgstr "  -                retirer la ligne choisie du plan,"
+
+msgid "                   or put a dropped line back under Delete"
+msgstr "                   ou remettre une ligne écartée sous Delete"
+
+msgid "  a                ask the model about the contents of this directory"
+msgstr "  a                demander au modèle le contenu de ce dossier"
+
+msgid "  n                ask again, without the paths already listed"
+msgstr "  n                redemander, sans les chemins déjà listés"
 
 msgid "  d                delete the lines under Delete"
 msgstr "  d                supprimer les lignes sous Delete"
@@ -1337,3 +1346,45 @@ msgstr "Mise à jour de la liste  {done}/{count}"
 #, python-brace-format
 msgid "Recounting sizes  {n} items"
 msgstr "Recalcul des tailles  {n} éléments"
+
+msgid "The model returned an empty plan. Nothing was proposed."
+msgstr "Le modèle a renvoyé un plan vide. Rien n'a été proposé."
+
+msgid "Sent {sent} entries from {path}. Waiting for the answer."
+msgstr "Envoi de {sent} entrées depuis {path}. En attente de la réponse."
+
+msgid "Counting {n} entries in {path}."
+msgstr "Comptage de {n} entrées dans {path}."
+
+msgid "Enter received. Still working."
+msgstr "Entrée reçue. Le travail continue."
+
+msgid "Key received. Still working."
+msgstr "Touche reçue. Le travail continue."
+
+msgid "This directory has nothing to send."
+msgstr "Ce dossier n'a rien à envoyer."
+
+msgid " Enter back to the plan"
+msgstr " Entrée pour revenir au plan"
+
+msgid "a asks about the contents of a directory"
+msgstr "a interroge le contenu d'un dossier"
+
+msgid " Inside {path}"
+msgstr " Dans {path}"
+
+msgid "Nothing else to send."
+msgstr "Plus rien d'autre à envoyer."
+
+msgid "n asks for another selection"
+msgstr "n demande une autre sélection"
+
+msgid "  f                skip the simulation. d and m still ask for yes"
+msgstr "  f                passer la simulation. d et m demandent toujours yes"
+
+msgid "Direct."
+msgstr "Direct."
+
+msgid "No simulation. The check runs when the removal starts."
+msgstr "Pas de simulation. Le contrôle a lieu au début de la suppression."

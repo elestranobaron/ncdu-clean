@@ -69,6 +69,37 @@ assert mod.suggestion_block("/mnt/win/Windows/SoftwareDistribution") is None
 PY
 
 python3 - <<'PY'
+import importlib.machinery
+mod = importlib.machinery.SourceFileLoader("ncdu_clean", "ncdu-clean").load_module()
+root = [
+    {"name": "/srv/data", "asize": 0, "dsize": 0},
+    [
+        {"name": "proj", "asize": 0, "dsize": 0},
+        {"name": "a.bin", "asize": 10, "dsize": 10},
+        [
+            {"name": "sub", "asize": 0, "dsize": 0},
+            {"name": "b.bin", "asize": 20, "dsize": 20},
+        ],
+    ],
+]
+node = root[1]
+payload, index, _sizes = mod.build_payload(node, disks=[], scope="/srv/data/proj")
+paths = [item["path"] for item in payload["items"]]
+assert "/srv/data/proj/a.bin" in paths, paths
+assert "/srv/data/proj/sub" in paths, paths
+assert "/srv/data/proj" not in paths, paths
+assert "/srv/data/proj/sub/b.bin" in paths, paths
+assert payload["root"] == "/srv/data/proj"
+assert index["/srv/data/proj/a.bin"]["size"] == 10
+payload, _index, _sizes = mod.build_payload(
+    node, disks=[], scope="/srv/data/proj", sizes=_sizes[0], known_total=3,
+    skip={"/srv/data/proj/a.bin"})
+paths = [item["path"] for item in payload["items"]]
+assert "/srv/data/proj/a.bin" not in paths, paths
+assert "/srv/data/proj/sub/b.bin" in paths, paths
+PY
+
+python3 - <<'PY'
 import importlib.machinery, os
 mod = importlib.machinery.SourceFileLoader("ncdu_clean", "ncdu-clean").load_module()
 for row in mod.list_storage():

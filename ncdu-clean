@@ -876,7 +876,7 @@ def run_removal(paths, scan, recursive, trash, yes, log_path, hint=True, sink=No
             finished = []
             lock = threading.Lock()
 
-            def run(path):
+            def take(path):
                 try:
                     result = handle(path)
                 except Exception as exc:
@@ -887,7 +887,7 @@ def run_removal(paths, scan, recursive, trash, yes, log_path, hint=True, sink=No
             while waiting or active:
                 while waiting and len(active) < width:
                     path = waiting.pop(0)
-                    worker = threading.Thread(target=run, args=(path,), daemon=True)
+                    worker = threading.Thread(target=take, args=(path,), daemon=True)
                     active[path] = worker
                     worker.start()
                 board.paint()
@@ -1395,18 +1395,64 @@ def disk_rows(disks, limit=6, scan_root=None):
     return lines, max(0, len(shown) - limit)
 
 
-def build_payload(root, cancel=None, disks=None, progress=None):
-    """Summary of the export, plus an index of the entries sent to the model."""
-    disk, _app = {}, {}
-    counted = [0]
-    compute_sizes(root, disk, _app, cancel, counted, progress)
+def count_nodes(node, cancel=None, progress=None):
+    """How many entries this node contains, including itself."""
+    pending = [node]
+    total = 0
+    while pending:
+        cur = pending.pop()
+        total += 1
+        if total % 4096 == 0:
+            if cancel and cancel():
+                raise SuggestCancelled(_("suggestion cancelled"))
+            if progress:
+                progress(total)
+                time.sleep(0)
+        pending.extend(children_of(cur))
+    if progress:
+        progress(total)
+    return total
+
+
+def build_payload(root, cancel=None, disks=None, progress=None, scope=None, sizes=None,
+                  skip=None, known_total=None):
+    """Summary of the export, plus an index of the entries sent to the model.
+
+    scope is the absolute path of root when root is a directory inside the scan.
+    sizes is a size map already computed for these nodes.
+    skip holds paths already shown. A skipped path and everything under it stay out.
+    known_total avoids counting the whole tree again."""
+    if sizes is None:
+        disk, _app = {}, {}
+        counted = [0]
+        compute_sizes(root, disk, _app, cancel, counted, progress)
+        total_nodes = max(counted[0] - 1, 0)
+    else:
+        disk = sizes
+        _app = {}
+        if known_total is None:
+            total_nodes = max(count_nodes(root, cancel, progress) - 1, 0)
+        else:
+            total_nodes = known_total
     index = {}
     candidates = []
+    skipped = set(skip or ())
+
+    def kept_out(path):
+        if path in skipped:
+            return True
+        for prefix in skipped:
+            if path.startswith(prefix + "/"):
+                return True
+        return False
 
     def walk(node, parent, depth):
         info = info_of(node)
         name = info["name"]
-        path = name if parent is None else parent + "/" + name
+        if parent is None:
+            path = scope if scope else name
+        else:
+            path = parent + "/" + name
         is_dir = isinstance(node, list)
         if depth >= 1:
             rec = {
@@ -1423,7 +1469,7 @@ def build_payload(root, cancel=None, disks=None, progress=None):
                 walk(child, path, depth + 1)
 
     walk(root, None, 0)
-    root_path = info_of(root)["name"]
+    root_path = scope if scope else info_of(root)["name"]
     if not root_path.startswith("/"):
         root_path = normalize(root_path)
 
@@ -1437,7 +1483,7 @@ def build_payload(root, cancel=None, disks=None, progress=None):
         level_rows = [rec for rec in candidates if depth_of(rec["path"]) == level]
         level_rows.sort(key=lambda rec: rec["size"], reverse=True)
         for rec in level_rows:
-            if rec["path"] in seen or suggestion_block(rec["path"]):
+            if rec["path"] in seen or suggestion_block(rec["path"]) or kept_out(rec["path"]):
                 continue
             if root_here and not os.path.lexists(rec["path"]):
                 continue
@@ -1451,7 +1497,7 @@ def build_payload(root, cancel=None, disks=None, progress=None):
         files = [rec for rec in candidates if rec["type"] == "file"]
         files.sort(key=lambda rec: rec["size"], reverse=True)
         for rec in files:
-            if rec["path"] in seen:
+            if rec["path"] in seen or kept_out(rec["path"]):
                 continue
             if root_here and not os.path.lexists(rec["path"]):
                 continue
@@ -1478,7 +1524,7 @@ def build_payload(root, cancel=None, disks=None, progress=None):
         if disk_row.get("model"):
             row["model"] = disk_row["model"]
         public.append(row)
-    return {"root": root_path, "total": max(counted[0] - 1, 0), "items": items, "disks": public}, index, (disk, _app)
+    return {"root": root_path, "total": total_nodes, "items": items, "disks": public}, index, (disk, _app)
 
 
 def ai_argv():
@@ -2067,6 +2113,8 @@ def show_plan(accepted, dropped):
         print(_("Dropped"))
         for row in dropped:
             print(f"  {row['path'] or '-'}  {row.get('reason', '')}")
+    if not deletes and not quarantines and not dropped:
+        print(_("The model returned an empty plan. Nothing was proposed."))
     return deletes, quarantines
 
 
@@ -2559,15 +2607,24 @@ class Browser:
                     time=fmt_clock(time.monotonic() - state["think_at"]))
             elif phase == "ask":
                 title = _("Asking the model")
-                detail = _("Sent {sent} entries out of {total}. Waiting for the answer.") \
-                    .format(sent=state.get("sent", 0), total=state.get("total", 0))
+                if state.get("scope"):
+                    detail = _("Sent {sent} entries from {path}. Waiting for the answer.") \
+                        .format(sent=state.get("sent", 0), total=state.get("total", 0),
+                                path=state["scope"])
+                else:
+                    detail = _("Sent {sent} entries out of {total}. Waiting for the answer.") \
+                        .format(sent=state.get("sent", 0), total=state.get("total", 0))
             elif phase == "read":
                 title = _("Reading the answer")
                 detail = _("The model has answered. Nothing is deleted yet.")
             else:
                 title = _("Preparing the summary")
-                detail = _("Counting {n} entries. The model is not called yet.") \
-                    .format(n=state.get("counted", 0))
+                if state.get("scope"):
+                    detail = _("Counting {n} entries in {path}.") \
+                        .format(n=state.get("counted", 0), path=state["scope"])
+                else:
+                    detail = _("Counting {n} entries. The model is not called yet.") \
+                        .format(n=state.get("counted", 0))
             header = _(" ncdu-clean · suggestion") + " · " + self.scan_name \
                 + " · " + fmt_clock(elapsed)
             scr.addnstr(0, 0, header.ljust(w - 1), w - 1, curses.A_REVERSE)
@@ -2666,11 +2723,11 @@ class Browser:
                 raw = raw[width:]
         return flat[-rows:]
 
-    def notice_screen(self, scr, lines, reply=""):
+    def notice_screen(self, scr, lines, reply="", footer=None):
         """Say why a suggestion failed, then return to the file list."""
         import curses
         if not reply:
-            self._panel(scr, _("Suggestion"), lines)
+            self._panel(scr, _("Suggestion"), lines, footer=footer)
             while True:
                 k = scr.getch()
                 if k in (10, 13, curses.KEY_ENTER, 27, ord("q"), ord("x"), ord(" ")):
@@ -2692,7 +2749,7 @@ class Browser:
                     y = err_at + i
                     if 1 <= y < h - 1:
                         scr.addnstr(y, 0, (" " + self._fit(line, w - 1)).ljust(w - 1), w - 1, curses.A_BOLD)
-                scr.addnstr(h - 1, 0, _(" Enter back to the file list").ljust(w - 1), w - 1)
+                scr.addnstr(h - 1, 0, (footer or _(" Enter back to the file list")).ljust(w - 1), w - 1)
                 scr.refresh()
             except curses.error:
                 pass
@@ -2765,8 +2822,11 @@ class Browser:
             scr.nodelay(False)
         worker.join()
 
-    def run_suggested(self, scr, rows, trash):
-        """Simulate, ask, then act, all on this screen. Return True if they confirmed."""
+    def run_suggested(self, scr, rows, trash, simulate=True):
+        """Ask, then act, on this screen. Return True if they confirmed.
+
+        simulate walks the disk first and shows the result. Without it, yes
+        comes at once and the same check runs when the removal starts."""
         import curses
         paths = [row["path"] for row in rows]
         sink = JobSink()
@@ -2777,14 +2837,19 @@ class Browser:
             sink.add_log(_("These paths were suggested for quarantine. They will be deleted instead."))
         holder = {}
 
-        def simulate():
+        def simulate_job():
             try:
                 holder["out"] = run_removal(
                     paths, self.root, True, trash, False, self.log_path, hint=False, sink=sink)
             except Exception as exc:
                 holder["err"] = exc
 
-        self._drive_job(scr, sink, simulate, _("Simulation. q quits"))
+        if simulate:
+            self._drive_job(scr, sink, simulate_job, _("Simulation. q quits"))
+        else:
+            for row in rows:
+                sink.add_log("{path}  {size}".format(path=row["path"], size=human(row.get("size", 0))))
+            sink.add_log(_("No simulation. The check runs when the removal starts."))
         if trash:
             sink.add_log(_("Quarantine folder: {path}").format(path=trash))
         typed = ""
@@ -2818,6 +2883,101 @@ class Browser:
         self._drive_job(scr, sink, act, _("q quits"))
         return True
 
+    def ask_inside(self, scr, node, scope, disks, skip=None, known_total=None, empty_note=None):
+        """Ask the model about one directory, or the whole scan when scope is empty."""
+        import curses
+        state = {"phase": "prepare", "cancel": False, "sent": 0, "total": 0, "disks": disks,
+                 "scan": scope or normalize(info_of(self.root)["name"])}
+        if scope:
+            state["scope"] = scope
+        holder = {}
+
+        def note_think(text):
+            state["think"] = text
+            if "think_at" not in state:
+                state["think_at"] = time.monotonic()
+
+        def note_think_done(raw):
+            try:
+                state["think_s"] = float(raw)
+            except ValueError:
+                state["think_s"] = 0
+
+        def work():
+            try:
+                state["phase"] = "prepare"
+                payload, index, _sizes = build_payload(
+                    node, cancel=lambda: state["cancel"], disks=disks, scope=scope,
+                    sizes=self.disk if self.disk else None, skip=skip, known_total=known_total,
+                    progress=lambda n: state.__setitem__("counted", n))
+                if not payload["items"]:
+                    holder["empty"] = empty_note or _("This directory has nothing to send.")
+                    return
+                state["phase"] = "ask"
+                state["sent"] = len(payload["items"])
+                state["total"] = payload["total"]
+                plan = run_ai(payload, cancel=lambda: state["cancel"],
+                              on_text=lambda text: state.__setitem__("reply", text),
+                              on_think=note_think,
+                              on_think_done=note_think_done,
+                              proc_slot=state)
+                state["phase"] = "read"
+                accepted, dropped = filter_plan(plan, index, self.root)
+                need = sum(row.get("size", 0) for row in accepted if row["action"] == "quarantine")
+                dest = choose_quarantine_dir(
+                    plan.get("quarantine_to") if isinstance(plan, dict) else None,
+                    payload["disks"], payload["root"], need, [row["path"] for row in accepted])
+                holder["ok"] = (accepted, dropped, state["sent"], state["total"], dest)
+            except Exception as exc:
+                holder["err"] = exc
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        started = time.monotonic()
+        spin = 0
+        note = ""
+        scr.timeout(50)
+        try:
+            while worker.is_alive():
+                self._activity(scr, state, time.monotonic() - started, spin, note)
+                spin += 1
+                key = scr.getch()
+                if key in (10, 13, curses.KEY_ENTER):
+                    note = _("Enter received. Still working.")
+                elif key in (ord("q"), 27):
+                    state["cancel"] = True
+                    _stop_proc(state.get("proc"))
+                elif key not in (-1,):
+                    note = _("Key received. Still working.")
+        finally:
+            scr.timeout(-1)
+        worker.join()
+        history = append_suggest_history(state.get("think") or "", state.get("reply") or "")
+        scr.timeout(0)
+        while scr.getch() != -1:
+            pass
+        scr.timeout(-1)
+        if state.get("cancel"):
+            return None
+        if holder.get("empty"):
+            note = holder["empty"]
+            if note is True:
+                note = _("This directory has nothing to send.")
+            return ("note", note)
+        if "err" in holder:
+            err = holder["err"]
+            if isinstance(err, SuggestCancelled):
+                return None
+            back = _(" Enter back to the plan")
+            if isinstance(err, SuggestError):
+                self.notice_screen(scr, explain_failure(err, True).splitlines(),
+                                   state.get("reply") or "", footer=back)
+            else:
+                self.notice_screen(scr, [str(err)], footer=back)
+            return None
+        accepted, dropped, shown, total, dest = holder["ok"]
+        return ("plan", accepted, dropped, shown, total, dest, history)
+
     def plan_help_lines(self):
         return [
             _("Plan"),
@@ -2828,12 +2988,17 @@ class Browser:
             "",
             _("  t                move the selected line from Delete to Quarantine,"),
             _("                   or from Quarantine to Delete"),
-            _("  -                take the selected line out of the plan"),
+            _("  -                take the selected line out of the plan,"),
+            _("                   or put a dropped line back under Delete"),
+            "",
+            _("  a                ask the model about the contents of this directory"),
+            _("  n                ask again, without the paths already listed"),
             "",
             _("  d                delete the lines under Delete"),
             _("                   asks for confirmation; nothing happens before yes"),
             _("  m                move the lines under Quarantine into the folder"),
             _("                   asks for confirmation; nothing happens before yes"),
+            _("  f                skip the simulation. d and m still ask for yes"),
             "",
             _("  F1 ?             this help"),
             _("  q Esc            quit; nothing is deleted or moved"),
@@ -2846,6 +3011,10 @@ class Browser:
         dropped_live = list(dropped)
         cursor = 0
         follow = None
+        inside = None
+        notice = ""
+        skipped = set()
+        direct = False
         self._plan_top = 0
         while True:
             deletes, delete_size, quarantines, quarantine_size, dropped_rows = self.plan_groups(
@@ -2879,6 +3048,8 @@ class Browser:
                 sub = _(" {n} entries").format(n=shown)
             scr.addnstr(1, 0, sub.ljust(w - 1), w - 1, curses.A_BOLD)
             pinned = [" " + _("Disks")]
+            if inside:
+                pinned.append(_(" Inside {path}").format(path=inside))
             disk_lines, more = disk_rows(
                 disks, 4, scan_root=normalize(info_of(self.root)["name"]))
             pinned.extend(disk_lines or [" " + _("No disk found.")])
@@ -2941,6 +3112,9 @@ class Browser:
                         rendered.append((seen, " " * len(prefix) + self._fit(reason, max(w - len(prefix) - 1, 1)),
                                          reason_attr))
                     seen += 1
+            if not rendered:
+                rendered.append((None, " " + _("The model returned an empty plan. Nothing was proposed."),
+                                 curses.A_BOLD))
             start = 0
             for index, (owner, _text, _attr) in enumerate(rendered):
                 if owner == cursor:
@@ -2956,15 +3130,24 @@ class Browser:
             self._plan_top = max(0, min(self._plan_top, max(len(rendered) - body_h, 0)))
             for i, (_owner, text, attr) in enumerate(rendered[self._plan_top:self._plan_top + body_h]):
                 scr.addnstr(body_top + i, 0, text.ljust(w - 1), w - 1, attr)
-            status = [_("Plan ready.")]
+            if notice:
+                status = [notice]
+            elif not items:
+                status = [_("The model returned an empty plan. Nothing was proposed.")]
+            else:
+                status = [_("Plan ready.")]
             if deletes:
                 status.append(_("Delete frees {size}.").format(size=human(delete_size)))
             if quarantines:
                 status.append(_("Quarantine sets aside {size}.").format(size=human(quarantine_size)))
+            if direct:
+                status.append(_("Direct."))
             scr.addnstr(h - 2, 0, (" " + "  ·  ".join(status)).ljust(w - 1), w - 1, curses.A_BOLD)
-            scr.addnstr(h - 1, 0, _(" arrows    F1 help    q quits").ljust(w - 1), w - 1)
+            scr.addnstr(h - 1, 0, _(" arrows    a inside    n next    F1 help    q quits").ljust(w - 1), w - 1)
             scr.refresh()
             k = scr.getch()
+            if k != -1 and k != ord("a"):
+                notice = ""
             if k in (curses.KEY_DOWN, ord("j")) and items:
                 cursor = min(cursor + 1, len(items) - 1)
             elif k in (curses.KEY_UP, ord("k")) and items:
@@ -2987,16 +3170,85 @@ class Browser:
                 elif row.get("action") == "quarantine":
                     row["action"] = "delete"
                     follow = row.get("path")
+            elif k == ord("a") and items:
+                row = items[cursor]
+                path = row.get("path") or ""
+                node = find(self.root, path)
+                if not isinstance(node, list):
+                    notice = _("a asks about the contents of a directory")
+                else:
+                    got = self.ask_inside(scr, node, path, disks)
+                    if got and got[0] == "note":
+                        notice = got[1]
+                    elif got and got[0] == "plan":
+                        _kind, accepted, dropped, shown, total, dest, history = got
+                        live = [item for item in accepted
+                                if item.get("action") in ("delete", "quarantine")]
+                        dropped_live = list(dropped)
+                        inside = path
+                        cursor = 0
+                        follow = None
+                        self._plan_top = 0
+                        notice = ""
+            elif k == ord("n"):
+                for row in list(live) + list(dropped_live):
+                    path = row.get("path") or ""
+                    if path:
+                        skipped.add(path)
+                if inside:
+                    node = find(self.root, inside)
+                    scope = inside
+                    known = None
+                else:
+                    node = self.root
+                    scope = None
+                    known = total
+                if not isinstance(node, list):
+                    notice = _("n asks for another selection")
+                else:
+                    got = self.ask_inside(
+                        scr, node, scope, disks, skip=skipped, known_total=known,
+                        empty_note=_("Nothing else to send."))
+                    if got and got[0] == "note":
+                        notice = got[1]
+                    elif got and got[0] == "plan":
+                        _kind, accepted, dropped, shown, total, dest, history = got
+                        live = [item for item in accepted
+                                if item.get("action") in ("delete", "quarantine")]
+                        dropped_live = list(dropped)
+                        for row in list(live) + list(dropped_live):
+                            path = row.get("path") or ""
+                            if path:
+                                skipped.add(path)
+                        cursor = 0
+                        follow = None
+                        self._plan_top = 0
+                        notice = ""
             elif k == ord("-") and items:
                 row = items[cursor]
+                path = row.get("path")
                 if row.get("action") in ("delete", "quarantine"):
-                    path = row.get("path")
                     live = [item for item in live if item.get("path") != path]
-                    dropped_live.append({"path": path, "reason": _("taken out of the plan")})
+                    dropped_live.append({
+                        "path": path,
+                        "reason": _("taken out of the plan"),
+                        "size": row.get("size", 0),
+                    })
                     follow = path
+                elif row.get("reason") == _("taken out of the plan"):
+                    dropped_live = [item for item in dropped_live if item.get("path") != path]
+                    live.append({
+                        "path": path,
+                        "action": "delete",
+                        "reason": "",
+                        "size": row.get("size", 0),
+                    })
+                    follow = path
+            elif k == ord("f"):
+                direct = not direct
             elif k == ord("d") and deletes:
                 self._ack(scr, _("d received. Nothing is deleted until you type yes."))
-                if self.run_suggested(scr, deletes, None):
+                if self.run_suggested(scr, deletes, None, simulate=not direct):
                     gone = {row["path"] for row in deletes}
                     live = [row for row in live if row["path"] not in gone]
                     if not live:
@@ -3004,7 +3256,7 @@ class Browser:
                         return
             elif k == ord("m") and quarantines:
                 self._ack(scr, _("m received. Nothing is moved until you type yes."))
-                if self.run_suggested(scr, quarantines, dest["path"]):
+                if self.run_suggested(scr, quarantines, dest["path"], simulate=not direct):
                     gone = {row["path"] for row in quarantines}
                     live = [row for row in live if row["path"] not in gone]
                     if not live:
